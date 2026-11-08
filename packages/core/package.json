@@ -1,5 +1,5 @@
 {
-  "name": "@coderbaba/core",
+  "name": "@coderbabasi/core",
   "version": "0.1.0",
   "description": "UI-free agent loop, tools, and API client for CoderBaba",
   "license": "MIT",
@@ -27,7 +27,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@coderbaba/shared": "workspace:*"
+    "@coderbabasi/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

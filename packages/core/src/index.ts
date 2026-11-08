@@ -35,7 +35,7 @@ export function formatStatus(input: {
   modelLabel: string;
   project: string;
   direct: boolean;
-  usage: import("@coderbaba/shared").UsageResponse | null;
+  usage: import("@coderbabasi/shared").UsageResponse | null;
 }): string {
   const where = `${input.modelLabel} · ${input.project}`;
   if (input.direct) return `${where} · your OpenRouter key`;

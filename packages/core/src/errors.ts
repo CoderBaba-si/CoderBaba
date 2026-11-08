@@ -1,4 +1,4 @@
-import { ErrorCodes, type ErrorCode } from "@coderbaba/shared";
+import { ErrorCodes, type ErrorCode } from "@coderbabasi/shared";
 
 export class CoderBabaError extends Error {
   readonly code: string;

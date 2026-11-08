@@ -4,7 +4,7 @@ import {
   isErrorResponse,
   type ChatMessage,
   type ChatRequestBody,
-} from "@coderbaba/shared";
+} from "@coderbabasi/shared";
 import { CoderBabaError } from "./errors.js";
 import { consumeSse } from "./sse.js";
 

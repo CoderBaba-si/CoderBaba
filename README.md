@@ -36,8 +36,8 @@ CoderBaba wants to run npm install. Allow? (y / always / n)
 | Package | npm | |
 | --- | --- | --- |
 | [`packages/cli`](packages/cli) | `coderbaba` | Ink terminal UI and slash commands |
-| [`packages/core`](packages/core) | `@coderbaba/core` | UI-free agent loop, tools, permissions, `/undo`, API and login client, sessions |
-| [`packages/shared`](packages/shared) | `@coderbaba/shared` | API types, model allowlist, error codes |
+| [`packages/core`](packages/core) | `@coderbabasi/core` | UI-free agent loop, tools, permissions, `/undo`, API and login client, sessions |
+| [`packages/shared`](packages/shared) | `@coderbabasi/shared` | API types, model allowlist, error codes |
 
 `core` emits events and asks for permission through an injected `askPermission()` callback, so a desktop app can reuse it later.
 

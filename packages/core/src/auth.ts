@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { isErrorResponse, type AnonymousResponse, type UsageResponse, type VerifyResponse } from "@coderbaba/shared";
+import { isErrorResponse, type AnonymousResponse, type UsageResponse, type VerifyResponse } from "@coderbabasi/shared";
 import { CoderBabaError, friendlyMessage } from "./errors.js";
 import { apiBaseUrl, usesDirectOpenRouter } from "./llm.js";
 

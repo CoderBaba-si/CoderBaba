@@ -1,4 +1,4 @@
-import type { ChatMessage, ToolCall } from "@coderbaba/shared";
+import type { ChatMessage, ToolCall } from "@coderbabasi/shared";
 import { Checkpoints } from "./checkpoints.js";
 import { CoderBabaError } from "./errors.js";
 import type { Llm } from "./llm.js";

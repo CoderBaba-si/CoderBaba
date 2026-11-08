@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ChatMessage } from "@coderbaba/shared";
+import type { ChatMessage } from "@coderbabasi/shared";
 import { dataDir } from "./auth.js";
 
 export type Session = {

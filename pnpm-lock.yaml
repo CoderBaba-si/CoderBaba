@@ -20,10 +20,10 @@ importers:
 
   packages/cli:
     dependencies:
-      '@coderbaba/core':
+      '@coderbabasi/core':
         specifier: workspace:*
         version: link:../core
-      '@coderbaba/shared':
+      '@coderbabasi/shared':
         specifier: workspace:*
         version: link:../shared
       ink:
@@ -51,7 +51,7 @@ importers:
 
   packages/core:
     dependencies:
-      '@coderbaba/shared':
+      '@coderbabasi/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:

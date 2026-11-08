@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ErrorCodes } from "@coderbaba/shared";
+import { ErrorCodes } from "@coderbabasi/shared";
 import { maskEmail, readAuth, saveAuth } from "./auth.js";
 import { friendlyMessage } from "./errors.js";
 

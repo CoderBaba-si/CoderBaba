@@ -28,8 +28,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@coderbaba/core": "workspace:*",
-    "@coderbaba/shared": "workspace:*",
+    "@coderbabasi/core": "workspace:*",
+    "@coderbabasi/shared": "workspace:*",
     "ink": "^5.2.1",
     "react": "^18.3.1"
   },

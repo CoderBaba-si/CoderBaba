@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import path from "node:path";
-import { ErrorCodes, MODELS, findModel, type UsageResponse } from "@coderbaba/shared";
+import { ErrorCodes, MODELS, findModel, type UsageResponse } from "@coderbabasi/shared";
 import {
   Checkpoints,
   CoderBabaError,
@@ -26,7 +26,7 @@ import {
   type PermissionDecision,
   type PermissionRequest,
   type Session,
-} from "@coderbaba/core";
+} from "@coderbabasi/core";
 
 type Line =
   | { kind: "user"; text: string }
