@@ -6,7 +6,7 @@
   "homepage": "https://coderbaba.si",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/coderbabaroot/coderbaba.git",
+    "url": "git+https://github.com/CoderBaba-si/coderbaba.git",
     "directory": "packages/cli"
   },
   "engines": {
