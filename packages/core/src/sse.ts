@@ -33,10 +33,13 @@ export async function consumeSse(
 ): Promise<ParsedStream> {
   const calls = new Map<number, { id: string; name: string; arguments: string }>();
   let content = "";
-  let finishReason = "stop";
+  let finishReason = "";
   let usage: ParsedStream["usage"];
   for await (const data of readSse(body)) {
-    if (data === "[DONE]") break;
+    if (data === "[DONE]") {
+      finishReason ||= "stop";
+      break;
+    }
     let json: {
       error?: { code?: string; message?: string; resetAt?: string };
       choices?: Array<{
@@ -84,8 +87,20 @@ export async function consumeSse(
       };
     }
   }
-  const toolCalls = [...calls.entries()]
+  let toolCalls = [...calls.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, call]) => call);
+  // A stream that ends with no finish reason was cut off by the host, so treat it like a length stop.
+  if (!finishReason) finishReason = "length";
+  if (finishReason === "length") toolCalls = toolCalls.filter((call) => isCompleteJson(call.arguments));
   return { content, toolCalls, finishReason, usage };
+}
+
+function isCompleteJson(text: string): boolean {
+  try {
+    JSON.parse(text || "{}");
+    return true;
+  } catch {
+    return false;
+  }
 }

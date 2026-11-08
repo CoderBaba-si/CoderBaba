@@ -42,6 +42,31 @@ describe("sse", () => {
   });
 });
 
+describe("sse cut-off", () => {
+  function streamOf(frames: string[]) {
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        controller.close();
+      },
+    });
+  }
+
+  it("treats a stream that ends without a finish reason as cut off", async () => {
+    const parsed = await consumeSse(streamOf([`data: ${JSON.stringify({ choices: [{ delta: { content: "half" } }] })}\n\n`]));
+    expect(parsed.finishReason).toBe("length");
+  });
+
+  it("drops a tool call whose arguments were cut mid-way", async () => {
+    const partial = { choices: [{ delta: { tool_calls: [{ index: 0, id: "c", function: { name: "edit_file", arguments: '{"path":"a' } }] } }] };
+    const ending = { choices: [{ delta: {}, finish_reason: "length" }] };
+    const parsed = await consumeSse(streamOf([`data: ${JSON.stringify(partial)}\n\n`, `data: ${JSON.stringify(ending)}\n\ndata: [DONE]\n\n`]));
+    expect(parsed.finishReason).toBe("length");
+    expect(parsed.toolCalls).toEqual([]);
+  });
+});
+
 describe("runTurn", () => {
   it("edits a file after permission and stops when the model is done", async () => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cb-agent-"));

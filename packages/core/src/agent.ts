@@ -12,6 +12,8 @@ export type AgentEvent =
   | { type: "error"; code: string; message: string; resetAt?: string }
   | { type: "done"; seconds: number };
 
+const MAX_CONTINUES = 3;
+
 export async function runTurn(opts: {
   task: string;
   cwd: string;
@@ -28,7 +30,7 @@ export async function runTurn(opts: {
   const started = Date.now();
   const messages = opts.messages.slice();
   messages.push({ role: "user", content: opts.task });
-  let continued = false;
+  let continues = 0;
 
   for (let step = 0; step < opts.maxSteps; step++) {
     let result;
@@ -47,8 +49,8 @@ export async function runTurn(opts: {
       return { messages, stopCode: known.code };
     }
 
-    if (result.finishReason === "length" && result.toolCalls.length === 0 && !continued) {
-      continued = true;
+    if (result.finishReason === "length" && result.toolCalls.length === 0 && continues < MAX_CONTINUES) {
+      continues += 1;
       messages.push({ role: "assistant", content: result.content });
       messages.push({ role: "user", content: "Continue from where you left off." });
       continue;
