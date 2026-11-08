@@ -1,0 +1,20 @@
+{
+  "name": "coderbaba-workspace",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "version-packages": "changeset version",
+    "release": "pnpm build && node scripts/release.mjs"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.7",
+    "turbo": "^2.5.6",
+    "typescript": "^5.9.3"
+  }
+}

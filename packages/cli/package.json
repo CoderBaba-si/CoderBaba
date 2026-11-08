@@ -1,0 +1,43 @@
+{
+  "name": "coderbaba",
+  "version": "0.1.0",
+  "description": "Beginner-friendly terminal coding agent",
+  "license": "MIT",
+  "homepage": "https://coderbaba.si",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coderbabaroot/coderbaba.git",
+    "directory": "packages/cli"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["ai", "coding-agent", "cli", "terminal", "beginner"],
+  "type": "module",
+  "bin": {
+    "coderbaba": "./dist/bin.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/bin.tsx",
+    "test": "vitest run --passWithNoTests"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@coderbaba/core": "workspace:*",
+    "@coderbaba/shared": "workspace:*",
+    "ink": "^5.2.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/react": "^18.3.24",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
