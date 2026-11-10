@@ -29,7 +29,7 @@ export const MODELS: readonly ModelInfo[] = [
   {
     id: "fast",
     label: "Fast",
-    openrouterId: "google/gemini-2.5-flash",
+    openrouterId: "qwen/qwen3-coder-next",
     anonAllowed: true,
   },
   {
