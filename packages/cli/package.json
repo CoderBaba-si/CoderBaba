@@ -1,6 +1,6 @@
 {
   "name": "coderbaba",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Beginner-friendly terminal coding agent",
   "license": "MIT",
   "homepage": "https://coderbaba.si",
@@ -12,12 +12,20 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["ai", "coding-agent", "cli", "terminal", "beginner"],
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli",
+    "terminal",
+    "beginner"
+  ],
   "type": "module",
   "bin": {
     "coderbaba": "./dist/bin.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -1,6 +1,6 @@
 {
   "name": "@coderbabasi/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "UI-free agent loop, tools, and API client for CoderBaba",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
