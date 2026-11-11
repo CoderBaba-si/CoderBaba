@@ -1,6 +1,6 @@
 {
   "name": "@coderbabasi/core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "UI-free agent loop, tools, and API client for CoderBaba",
   "license": "MIT",
   "repository": {
