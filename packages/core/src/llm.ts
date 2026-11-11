@@ -63,6 +63,7 @@ class OpenRouterLlm implements Llm {
       tools: input.tools.length ? input.tools : undefined,
       stream: true,
       usage: { include: true },
+      provider: { data_collection: "deny" },
     };
     return postChat("https://openrouter.ai/api/v1/chat/completions", body, {
       Authorization: `Bearer ${this.apiKey}`,

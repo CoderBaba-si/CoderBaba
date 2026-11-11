@@ -17,7 +17,7 @@ const FALLBACK: Record<string, string> = {
   [ErrorCodes.CODE_EXPIRED]: "Code expired, sending a new one",
   [ErrorCodes.TOO_MANY_ATTEMPTS]: "Too many tries. Type r to send a new code.",
   [ErrorCodes.QUOTA_EXCEEDED]: "You're out of free usage.",
-  [ErrorCodes.TRIAL_EXHAUSTED]: "You've used your 5 free tries. Enter your email to keep going (still free)",
+  [ErrorCodes.TRIAL_EXHAUSTED]: "You've used all the free tasks on this device. Enter your email to keep going (still free)",
   [ErrorCodes.TRIAL_TASK_CAPPED]: "This free try hit its limit. Log in to continue (free)",
   [ErrorCodes.TRIAL_UNAVAILABLE]: "Free trials are busy right now. Log in to continue (free)",
   [ErrorCodes.MODEL_NOT_ALLOWED]: "That model unlocks after you log in (free). /login",

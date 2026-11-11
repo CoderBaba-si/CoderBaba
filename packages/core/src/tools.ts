@@ -51,6 +51,8 @@ export type ToolEvent = {
   file?: string;
   /** Result of an automatic check. */
   passed?: boolean;
+  /** The check was a dependency audit, which warns the user instead of failing the turn. */
+  advisory?: boolean;
   /** Short extra detail, such as why a check was skipped. */
   note?: string;
 };

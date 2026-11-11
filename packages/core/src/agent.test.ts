@@ -125,6 +125,50 @@ describe("runTurn", () => {
     expect(result.messages.some((message) => message.content === "Continue from where you left off.")).toBe(true);
   });
 
+  it("offers extra tools only when given and dispatches them before the built-in tools", async () => {
+    const seen: string[][] = [];
+    const ran: unknown[] = [];
+    const responses: LlmResult[] = [
+      { content: "", finishReason: "tool_calls", toolCalls: [{ id: "1", name: "note_it", arguments: JSON.stringify({ text: "hi" }) }] },
+      { content: "Done.", finishReason: "stop", toolCalls: [] },
+    ];
+    const llm: Llm = {
+      async chat(input) {
+        seen.push((input.tools as { function: { name: string } }[]).map((tool) => tool.function.name));
+        return responses.shift()!;
+      },
+    };
+    const events: string[] = [];
+    const result = await runTurn({
+      task: "note",
+      cwd: os.tmpdir(),
+      model: "fast",
+      taskId: "task-extra",
+      messages: [],
+      llm,
+      askPermission: async () => "deny",
+      allows: new Set(),
+      checkpoints: new Checkpoints(path.join(os.tmpdir(), "cb-extra-checkpoints")),
+      maxSteps: 3,
+      onEvent: (event) => {
+        if (event.type === "tool") events.push(event.event.name);
+      },
+      redact: new Set(["secret-value"]),
+      extraTools: {
+        definitions: [{ type: "function", function: { name: "note_it", description: "Note something.", parameters: { type: "object" } } }],
+        async run(name, args) {
+          ran.push(args);
+          return { content: "Noted secret-value.", event: { name } };
+        },
+      },
+    });
+    expect(seen[0]).toContain("note_it");
+    expect(seen[0]).toContain("read_file");
+    expect(ran).toEqual([{ text: "hi" }]);
+    expect(events).toEqual(["note_it"]);
+    expect(result.messages.find((message) => message.role === "tool")?.content).toBe("Noted ••••.");
+  });
+
   it("returns the trial error without keeping the prompt", async () => {
     const result = await runTurn({
       task: "sixth try",

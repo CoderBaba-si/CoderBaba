@@ -166,13 +166,20 @@ async function scriptAllowed(scriptName: string, ctx: Ctx): Promise<boolean> {
 
 const SCRIPT_NAMES = new Set(["dev", "start", "lint", "build", "test", "typecheck"]);
 const PKG_NAME = /^(?:@[\w.-]+\/)?[\w.-]+(?:@[\w.^~<>=-]+)?$/;
+const FLAG = /^--?[\w-]+(?:=[\w.-]+)?$/;
+
+/** Read-only listing commands: ls, outdated, and audit. "audit fix" and pnpm's "audit --fix" change files, so they ask. */
+function readOnlyPackageCommand(sub: string, rest: string[]): boolean {
+  if (sub === "audit" && rest.some((arg) => /^--fix(?:=|$)/.test(arg))) return false;
+  return (sub === "ls" || sub === "list" || sub === "outdated" || sub === "audit") && rest.every((arg) => FLAG.test(arg));
+}
 
 const npmRule: Rule = async (args, ctx) => {
   const [sub, ...rest] = args;
   if (!sub) return false;
   if (sub === "run" || sub === "run-script") return rest.length === 1 && SCRIPT_NAMES.has(rest[0]!) && scriptAllowed(rest[0]!, ctx);
   if (sub === "test" || sub === "t" || sub === "start") return rest.length === 0 && scriptAllowed(sub === "t" ? "test" : sub, ctx);
-  if (sub === "ls" || sub === "list" || sub === "outdated") return rest.every((arg) => /^--?[\w-]+(?:=[\w.-]+)?$/.test(arg));
+  if (readOnlyPackageCommand(sub, rest)) return true;
   if (sub === "view" || sub === "info" || sub === "show") {
     const [pkg, ...fields] = rest;
     return Boolean(pkg && PKG_NAME.test(pkg)) && fields.length <= 2 && fields.every((field) => /^[\w.]+$/.test(field));
@@ -185,7 +192,7 @@ const pnpmYarnRule: Rule = async (args, ctx) => {
   if (!sub) return false;
   if (sub === "run") return rest.length === 1 && SCRIPT_NAMES.has(rest[0]!) && scriptAllowed(rest[0]!, ctx);
   if (SCRIPT_NAMES.has(sub)) return rest.length === 0 && scriptAllowed(sub, ctx);
-  if (sub === "ls" || sub === "list" || sub === "outdated") return rest.every((arg) => /^--?[\w-]+(?:=[\w.-]+)?$/.test(arg));
+  if (readOnlyPackageCommand(sub, rest)) return true;
   if (sub === "view" || sub === "info") {
     const [pkg, ...fields] = rest;
     return Boolean(pkg && PKG_NAME.test(pkg)) && fields.length <= 2 && fields.every((field) => /^[\w.]+$/.test(field));
@@ -276,7 +283,7 @@ const curlRule: Rule = (args, ctx) => {
 const gitRule: Rule = (args) => {
   const [sub, ...rest] = args;
   if (!sub) return false;
-  if (["status", "diff", "log", "show", "rev-parse"].includes(sub)) {
+  if (["status", "diff", "log", "show", "rev-parse", "ls-files"].includes(sub)) {
     return !rest.some((arg) => arg.startsWith("--output") || arg === "--ext-diff");
   }
   if (sub === "branch") {
@@ -347,6 +354,24 @@ const pipRule: Rule = (args) => {
   if (sub === "list" || sub === "freeze") return rest.every((arg) => /^--?[\w-]+(?:=[\w.-]+)?$/.test(arg));
   if (sub === "show") return rest.length > 0 && rest.every((arg) => arg === "-f" || arg === "--files" || /^[\w.-]+$/.test(arg));
   return false;
+};
+
+const pipAuditRule: Rule = async (args, ctx) => {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--desc" || arg === "--format=json") continue;
+    if ((arg === "--format" || arg === "-f") && args[i + 1] === "json") {
+      i++;
+      continue;
+    }
+    if (arg === "-r" || arg === "--requirement") {
+      const file = args[++i];
+      if (!file || file.startsWith("-") || !(await pathOk(file, ctx))) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
 };
 
 const lsofRule: Rule = (args) => {
@@ -446,6 +471,9 @@ async function builtinSafe(words: string[], ctx: Ctx): Promise<boolean> {
   }
   if (command === "pip" || command === "pip3") {
     return (await projectBinary(command, ctx)) && pipRule(args, ctx);
+  }
+  if (command === "pip-audit") {
+    return (await projectBinary(command, ctx)) && pipAuditRule(args, ctx);
   }
 
   const rule = rules(ctx.platform)[command];

@@ -49,10 +49,11 @@ export { CONTEXT_BUDGET, SUMMARY_PREFIX, compact, contextSize, cutPoints, fitCon
 export type { CompactOptions, CompactResult } from "./context.js";
 export { BrowserSession, checkPage, describePageCheck, isLocalPageUrl, problemCount } from "./browser.js";
 export type { BrowserKind, PageCheck } from "./browser.js";
-export { failureMessage, globToRegExp, planChecks, runChecks } from "./checks.js";
+export { failureMessage, findAppFolders, globToRegExp, planChecks, runChecks } from "./checks.js";
 export type { CheckResult, CheckSettings, PlannedCheck, RunChecksOptions } from "./checks.js";
 export { runTurn } from "./agent.js";
-export type { AgentEvent, TurnOptions } from "./agent.js";
+export type { AgentEvent, ExtraTools, TurnOptions } from "./agent.js";
+export * from "./security/index.js";
 
 export function formatStatus(input: {
   modelLabel: string;
@@ -63,7 +64,8 @@ export function formatStatus(input: {
   const where = `${input.modelLabel} · ${input.project}`;
   if (input.direct) return `${where} · your OpenRouter key`;
   if (input.usage?.type === "anonymous") {
-    return `${where} · ${input.usage.triesLeft} of ${input.usage.triesLimit} free tries left · /login to keep going (free)`;
+    const { triesLeft } = input.usage;
+    return triesLeft > 20 ? `${where} · free, no sign-in needed` : `${where} · ${triesLeft} free tasks left · /login to keep going (free)`;
   }
   if (input.usage?.type === "user") {
     return `${where} · ${input.usage.daily.percentLeft}% of today's free usage left`;

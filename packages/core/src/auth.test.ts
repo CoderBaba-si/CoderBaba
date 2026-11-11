@@ -27,7 +27,7 @@ describe("friendly errors", () => {
   it("maps trial, quota, and code failures", () => {
     expect(friendlyMessage(ErrorCodes.INVALID_CODE)).toBe("That code didn't match, try again");
     expect(friendlyMessage(ErrorCodes.CODE_EXPIRED)).toBe("Code expired, sending a new one");
-    expect(friendlyMessage(ErrorCodes.TRIAL_EXHAUSTED)).toContain("5 free tries");
+    expect(friendlyMessage(ErrorCodes.TRIAL_EXHAUSTED)).toContain("free tasks on this device");
     expect(friendlyMessage(ErrorCodes.QUOTA_EXCEEDED, "You're out of free usage.", "08:00 UTC")).toContain("08:00 UTC");
     expect(friendlyMessage(ErrorCodes.OFFLINE)).toContain("No internet");
   });

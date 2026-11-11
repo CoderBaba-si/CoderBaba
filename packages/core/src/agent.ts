@@ -23,6 +23,12 @@ export type AgentEvent =
   | { type: "error"; code: string; message: string; resetAt?: string }
   | { type: "done"; seconds: number };
 
+/** Tools that exist only for one kind of turn, such as the security tools. */
+export type ExtraTools = {
+  definitions: { type: "function"; function: { name: string; description: string; parameters: unknown } }[];
+  run(name: string, args: Record<string, unknown>): Promise<{ content: string; event: ToolEvent }>;
+};
+
 const MAX_CONTINUES = 3;
 const MAX_CHECK_ROUNDS = 2;
 
@@ -47,6 +53,7 @@ export type TurnOptions = {
   browser?: BrowserSession;
   /** The session's todo list, shown to the model and replaced by write_todos. */
   todos?: { items: Todo[] };
+  extraTools?: ExtraTools;
 };
 
 export async function runTurn(opts: TurnOptions): Promise<{ messages: ChatMessage[]; stopCode?: string }> {
@@ -57,6 +64,8 @@ export async function runTurn(opts: TurnOptions): Promise<{ messages: ChatMessag
   const edited = new Set<string>();
   let checkRounds = 0;
   const root = realRoot(opts.cwd);
+  const extraNames = new Set(opts.extraTools?.definitions.map((definition) => definition.function.name));
+  const tools = opts.extraTools ? [...TOOL_DEFINITIONS, ...opts.extraTools.definitions] : TOOL_DEFINITIONS;
 
   for (let step = 0; step < opts.maxSteps; step++) {
     const fitted = await fitContext(messages, { llm: opts.llm, taskId: opts.taskId, model: opts.model, task: opts.task });
@@ -76,7 +85,7 @@ export async function runTurn(opts: TurnOptions): Promise<{ messages: ChatMessag
         taskId: opts.taskId,
         model: opts.model,
         messages: [{ role: "system", content: system }, ...messages],
-        tools: TOOL_DEFINITIONS,
+        tools,
         onText: (text) => opts.onEvent({ type: "text", text }),
       });
     } catch (error) {
@@ -121,6 +130,17 @@ export async function runTurn(opts: TurnOptions): Promise<{ messages: ChatMessag
         args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
       } catch {
         messages.push({ role: "tool", tool_call_id: call.id, content: "Arguments were not valid JSON." });
+        continue;
+      }
+      if (opts.extraTools && extraNames.has(call.function.name)) {
+        let extra: { content: string; event: ToolEvent };
+        try {
+          extra = await opts.extraTools.run(call.function.name, args);
+        } catch (error) {
+          extra = { content: error instanceof Error ? error.message : "Tool failed", event: { name: call.function.name, denied: true } };
+        }
+        opts.onEvent({ type: "tool", event: extra.event });
+        messages.push({ role: "tool", tool_call_id: call.id, content: redact(extra.content, opts.redact) });
         continue;
       }
       const outcome = await runTool({
@@ -171,11 +191,19 @@ async function runEndChecks(opts: TurnOptions, root: string, files: string[]): P
     onResult: (result) =>
       opts.onEvent({
         type: "tool",
-        event: { name: "check", command: result.command, cwd: result.rel, passed: result.passed, denied: Boolean(result.skipped), note: result.skipped },
+        event: {
+          name: "check",
+          command: result.command,
+          cwd: result.rel,
+          passed: result.passed,
+          denied: Boolean(result.skipped),
+          note: result.skipped,
+          advisory: result.advisory,
+        },
       }),
   });
   progress.stop();
-  const failed = results.some((result) => !result.passed);
+  const failed = results.some((result) => !result.passed && !result.advisory);
   return failed ? redact(failureMessage(results), opts.redact) : undefined;
 }
 

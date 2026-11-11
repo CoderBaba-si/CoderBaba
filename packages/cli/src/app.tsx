@@ -17,6 +17,15 @@ import {
   ensureAuth,
   INIT_TASK,
   NOTES_FILE,
+  SecurityStore,
+  isLoginCode,
+  runSecurityDiff,
+  runSecurityFix,
+  runSecurityScan,
+  runSecurityValidate,
+  statusTable,
+  type SecurityRunResult,
+  type SecurityTurnBase,
   chatMarkdown,
   exportChat,
   formatTodos,
@@ -84,6 +93,11 @@ const HELP = [
   "/undo      revert the last turn's file changes",
   "/compact   summarize the chat so far to free up room",
   "/init      write AGENTS.md, notes that help CoderBaba understand this project",
+  "/security  scan this project for security issues and write SECURITY_REPORT.md",
+  "  /security validate [id]  reproduce findings against your app on localhost",
+  "  /security fix <id>       fix a finding, run checks, and check the fix",
+  "  /security diff [base]    review uncommitted changes, or your branch against base",
+  "  /security status         list findings",
   "/todos     show this chat's todo list",
   "/export    save this chat as a Markdown file in the project",
   "/ps        list background processes (dev servers, databases)",
@@ -150,6 +164,12 @@ function toolLine(tool: ToolEvent): Line | null {
       return { kind: "tool", label: tool.denied ? "Could not read" : "Read", detail: `${tool.url ?? ""}${tool.note ? ` (${tool.note})` : ""}` };
     case "write_todos":
       return { kind: "tool", label: "Todos", detail: tool.note ?? "" };
+    case "save_threat_model":
+      return { kind: "tool", label: tool.denied ? "Skipped" : "Saved", detail: "threat model" };
+    case "record_finding":
+      return { kind: "tool", label: tool.denied ? "Skipped finding" : "Finding", detail: tool.note ?? "" };
+    case "update_finding":
+      return { kind: "tool", label: tool.denied ? "Not updated" : "Updated", detail: tool.note ?? "" };
     case "check_page": {
       if (tool.denied) return { kind: "tool", label: "Skipped page check", detail: tool.url ?? "" };
       const result = tool.passed ? "no errors" : (tool.note ?? "problems found");
@@ -157,6 +177,13 @@ function toolLine(tool: ToolEvent): Line | null {
     }
     case "check":
       if (tool.denied) return { kind: "tool", label: "Skipped check", detail: `${tool.command ?? ""}${where}${tool.note ? `: ${tool.note}` : ""}` };
+      if (tool.advisory && !tool.passed) {
+        return {
+          kind: "tool",
+          label: "Audit warning",
+          detail: `${tool.command ?? ""} found high-severity issues${tool.cwd ? ` in ${tool.cwd}/` : ""}. Type /security for details.`,
+        };
+      }
       return { kind: "tool", label: tool.passed ? "Checked" : "Check failed", detail: `${tool.command ?? ""}${where}` };
     case "edit_file":
       return {
@@ -356,18 +383,9 @@ export function App() {
     [],
   );
 
-  const runTask = useCallback(
-    async (task: string, currentAuth: AuthFile | null) => {
-      const current = session.current;
-      if (!current) return;
-      setMode({ kind: "busy" });
-      setStreaming("");
-      setProgress("");
-      setToolStartedAt(null);
-      setTurnStartedAt(Date.now());
-      if (!current.title) current.title = task.slice(0, 60);
-      const taskId = crypto.randomUUID();
-      const todoList = { items: current.todos ?? [] };
+  /** Streams agent events into the transcript; flush() pushes any half-streamed reply. */
+  const eventHandler = useCallback(
+    (todoList?: { items: Todo[] }) => {
       let text = "";
       const onEvent = (event: AgentEvent) => {
         if (event.type === "text") {
@@ -390,7 +408,7 @@ export function App() {
         } else if (event.type === "tool") {
           setProgress("");
           setToolStartedAt(null);
-          if (event.event.name === "write_todos") setTodos([...todoList.items]);
+          if (event.event.name === "write_todos" && todoList) setTodos([...todoList.items]);
           const line = toolLine(event.event);
           if (line) push(line);
         } else if (event.type === "done") {
@@ -399,37 +417,70 @@ export function App() {
           push({ kind: "error", text: friendlyMessage(event.code, event.message, event.resetAt) });
         }
       };
+      const flush = () => {
+        if (text) push({ kind: "assistant", text });
+        text = "";
+        setStreaming("");
+        setProgress("");
+        setToolStartedAt(null);
+      };
+      return { onEvent, flush };
+    },
+    [push],
+  );
+
+  /** The options every turn shares: permissions, processes, checkpoints, redaction, checks, and the browser. */
+  const turnBase = useCallback(
+    (currentAuth: AuthFile | null, onEvent: (event: AgentEvent) => void): SecurityTurnBase => ({
+      cwd,
+      model,
+      llm: createLlm(currentAuth?.token),
+      askPermission,
+      allows: allows.current,
+      checkpoints: checkpoints.current,
+      maxSteps: MAX_STEPS,
+      onEvent,
+      processes: processes.current,
+      askSecret,
+      userRules: activeRules(allowConfig.current),
+      redact: secrets.current,
+      checks: activeChecks(allowConfig.current),
+      browser: browser.current,
+    }),
+    [askPermission, askSecret, cwd, model],
+  );
+
+  const startBusy = useCallback(() => {
+    setMode({ kind: "busy" });
+    setStreaming("");
+    setProgress("");
+    setToolStartedAt(null);
+    setTurnStartedAt(Date.now());
+  }, []);
+
+  const runTask = useCallback(
+    async (task: string, currentAuth: AuthFile | null) => {
+      const current = session.current;
+      if (!current) return;
+      startBusy();
+      if (!current.title) current.title = task.slice(0, 60);
+      const todoList = { items: current.todos ?? [] };
+      const { onEvent, flush } = eventHandler(todoList);
       const result = await runTurn({
+        ...turnBase(currentAuth, onEvent),
         task,
-        cwd,
-        model,
-        taskId,
+        taskId: crypto.randomUUID(),
         messages: current.messages,
-        llm: createLlm(currentAuth?.token),
-        askPermission,
-        allows: allows.current,
-        checkpoints: checkpoints.current,
-        maxSteps: MAX_STEPS,
-        onEvent,
-        processes: processes.current,
-        askSecret,
-        userRules: activeRules(allowConfig.current),
-        redact: secrets.current,
-        checks: activeChecks(allowConfig.current),
-        browser: browser.current,
         todos: todoList,
       });
       current.todos = todoList.items;
-      if (text) push({ kind: "assistant", text });
-      setStreaming("");
-      setProgress("");
-      setToolStartedAt(null);
+      flush();
       current.messages = result.messages;
       current.model = model;
       await saveSession(current);
       await refreshUsage(currentAuth);
       if (result.stopCode === ErrorCodes.TRIAL_EXHAUSTED) {
-        setMode({ kind: "email", reason: "You've used your 5 free tries. Enter your email to keep going (still free)", retry: task });
+        setMode({ kind: "email", reason: "You've used all the free tasks on this device. Enter your email to keep going (still free)", retry: task });
         return;
       }
       if (result.stopCode === ErrorCodes.TRIAL_UNAVAILABLE || result.stopCode === ErrorCodes.UNAUTHORIZED) {
@@ -438,7 +489,77 @@ export function App() {
       }
       setMode({ kind: "chat" });
     },
-    [askPermission, askSecret, cwd, model, push, refreshUsage],
+    [eventHandler, model, refreshUsage, startBusy, turnBase],
+  );
+
+  const runSecurity = useCallback(
+    async (sub: string | undefined, arg: string | undefined) => {
+      const current = session.current;
+      if (!current) return;
+      const action = sub?.toLowerCase() ?? "scan";
+      if (action === "status") {
+        const store = await SecurityStore.open(cwd, secrets.current);
+        push({ kind: "info", text: statusTable(store.findings()) });
+        return;
+      }
+      if (!["scan", "validate", "fix", "diff"].includes(action)) {
+        push({ kind: "error", text: `Unknown option ${sub}. Use /security, /security validate, /security fix <id>, /security diff, or /security status.` });
+        return;
+      }
+      if (action === "fix" && !arg) {
+        push({ kind: "info", text: "Which one? Type /security fix S1. /security status lists the findings." });
+        return;
+      }
+      const currentAuth = auth ?? (await readAuth());
+      if (!direct && !currentAuth) {
+        push({ kind: "info", text: "CoderBaba couldn't start a free session. Check your connection and try again, or type /login" });
+        return;
+      }
+      const label = ["/security", sub, arg].filter(Boolean).join(" ");
+      push({ kind: "user", text: label });
+      if (!current.title) current.title = label;
+      startBusy();
+      const { onEvent, flush } = eventHandler();
+      const base = turnBase(currentAuth, onEvent);
+      let result: SecurityRunResult;
+      try {
+        if (action === "scan") {
+          push({ kind: "info", text: "Scanning this project for security issues. CoderBaba reads the code and runs a dependency audit; it doesn't change files." });
+          result = await runSecurityScan(base, {
+            onPhase: (phase) => {
+              flush();
+              push({ kind: "info", text: `Phase ${phase.index} of ${phase.total}: ${phase.label}` });
+            },
+          });
+        } else if (action === "validate") {
+          push({ kind: "info", text: "Reproducing findings against your app on localhost only, with test data." });
+          result = await runSecurityValidate(base, arg);
+        } else if (action === "fix") {
+          result = await runSecurityFix(base, arg!);
+        } else {
+          result = await runSecurityDiff(base, arg);
+        }
+      } catch (error) {
+        flush();
+        push({ kind: "error", text: error instanceof Error ? error.message : "The security run failed." });
+        setMode({ kind: "chat" });
+        return;
+      }
+      flush();
+      push({ kind: "info", text: result.summary });
+      if (result.ranModel) {
+        current.messages.push({ role: "user", content: label }, { role: "assistant", content: result.summary });
+        current.model = model;
+        await saveSession(current);
+        await refreshUsage(currentAuth);
+      }
+      if (result.stopCode && isLoginCode(result.stopCode)) {
+        setMode({ kind: "email", reason: "Enter your email to keep going (still free)" });
+        return;
+      }
+      setMode({ kind: "chat" });
+    },
+    [auth, cwd, direct, eventHandler, model, push, refreshUsage, startBusy, turnBase],
   );
 
   const sendCode = useCallback(
@@ -500,13 +621,16 @@ export function App() {
     if (checks.disabled) rows.push("Checks after edits: off (\"checks\": false).");
     else if (checks.configured.length) rows.push(`Checks after edits: ${checks.configured.map((check) => check.command).join(", ")}`);
     else rows.push("Checks after edits: detected per app folder (typecheck, lint, and Django's manage.py check).");
+    if (!checks.disabled) {
+      rows.push("Dependency audits: npm, pnpm, or yarn audit (and pip-audit when it's in the venv) after package.json, lockfile, or requirements.txt changes. They warn you and never block.");
+    }
     if (askAlways()) rows.push("CODERBABA_ASK_ALWAYS=1 is set, so every command asks first.");
     push({ kind: "info", text: rows.join("\n") });
   }, [push]);
 
   const command = useCallback(
     async (raw: string) => {
-      const [name, arg] = raw.trim().split(/\s+/);
+      const [name, arg, extra] = raw.trim().split(/\s+/);
       switch (name) {
         case "/help":
           push({ kind: "info", text: HELP });
@@ -526,7 +650,12 @@ export function App() {
           const latest = auth ? await fetchUsage(auth.token) : null;
           setUsage(latest);
           if (direct) push({ kind: "info", text: "Using your own OPENROUTER_API_KEY, so usage is not tracked here." });
-          else if (latest?.type === "anonymous") push({ kind: "info", text: `${latest.triesLeft} of ${latest.triesLimit} free tries left. /login to keep going (free).` });
+          else if (latest?.type === "anonymous") {
+            push({
+              kind: "info",
+              text: `${latest.triesLeft} of ${latest.triesLimit} free tasks left on this device. No sign-in needed; /login (free) unlocks the Smart model.`,
+            });
+          }
           else if (latest?.type === "user") {
             push({
               kind: "info",
@@ -632,6 +761,9 @@ export function App() {
           await runTask(INIT_TASK, currentAuth);
           return;
         }
+        case "/security":
+          await runSecurity(arg, extra);
+          return;
         case "/compact": {
           const current = session.current;
           const currentAuth = auth ?? (await readAuth());
@@ -680,7 +812,7 @@ export function App() {
           push({ kind: "error", text: `Unknown command ${name}. Type /help` });
       }
     },
-    [auth, cwd, direct, model, push, quit, runTask, showAllowRules],
+    [auth, cwd, direct, model, push, quit, runSecurity, runTask, showAllowRules],
   );
 
   const runBang = useCallback(

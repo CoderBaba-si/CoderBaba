@@ -29,13 +29,13 @@ export const MODELS: readonly ModelInfo[] = [
   {
     id: "fast",
     label: "Fast",
-    openrouterId: "qwen/qwen3-coder-next",
+    openrouterId: "cohere/north-mini-code:free",
     anonAllowed: true,
   },
   {
     id: "smart",
     label: "Smart",
-    openrouterId: "anthropic/claude-sonnet-4.5",
+    openrouterId: "qwen/qwen3-coder-next",
     anonAllowed: false,
   },
 ];

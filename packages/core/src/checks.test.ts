@@ -83,6 +83,32 @@ describe("planChecks", () => {
   it("runs nothing when checks are off", async () => {
     const files = [await write("client/src/App.tsx", "")];
     expect(await planChecks(root, files, { configured: [], disabled: true })).toEqual([]);
+    const deps = [await write("client/package-lock.json", "{}")];
+    expect(await planChecks(root, deps, { configured: [], disabled: true })).toEqual([]);
+  });
+
+  it("plans an advisory audit when dependency files change", async () => {
+    await write("web/pnpm-lock.yaml", "");
+    const files = [await write("client/package.json", "{}"), await write("client/package-lock.json", "{}"), path.join(root, "web/pnpm-lock.yaml")];
+    const planned = await planChecks(root, files, { configured: [], disabled: false });
+    expect(planned.map((check) => [check.rel, check.command, check.advisory])).toEqual([
+      ["client", "npm audit --audit-level=high", true],
+      ["web", "pnpm audit --audit-level=high", true],
+    ]);
+  });
+
+  it("adds audits next to configured checks, and only pip-audit from the venv", async () => {
+    const files = [await write("client/package.json", "{}"), await write("server/requirements.txt", "django\n")];
+    const planned = await planChecks(root, files, { configured: [{ command: "make check" }], disabled: false });
+    expect(planned.map((check) => check.command)).toEqual(["npm audit --audit-level=high"]);
+
+    await write("server/.venv/pyvenv.cfg", "home = /usr/bin\n");
+    await write(`server/.venv/${process.platform === "win32" ? "Scripts/pip-audit.exe" : "bin/pip-audit"}`, "");
+    const withVenv = await planChecks(root, files, { configured: [], disabled: false });
+    expect(withVenv.map((check) => [check.rel, check.command])).toEqual([
+      ["client", "npm audit --audit-level=high"],
+      ["server", "pip-audit -r requirements.txt"],
+    ]);
   });
 });
 
@@ -102,6 +128,28 @@ describe("runChecks", () => {
     const message = failureMessage(results);
     expect(message).toContain("$ node fail.js");
     expect(message).not.toContain("rm -rf");
+  });
+
+  it("keeps failed audits out of the message for the model", async () => {
+    await write("fail.js", "process.exit(1);\n");
+    await write("audit.js", "console.log('3 high severity vulnerabilities'); process.exit(1);\n");
+    const results = await runChecks(
+      [
+        { command: "node fail.js", folder: root, rel: "", source: "config" },
+        { command: "node audit.js", folder: root, rel: "", source: "config", advisory: true },
+      ],
+      { root },
+    );
+    expect(results[1]).toMatchObject({ passed: false, advisory: true });
+    const message = failureMessage(results);
+    expect(message).toContain("$ node fail.js");
+    expect(message).not.toContain("node audit.js");
+  });
+
+  it("treats an audit that can't reach the registry as skipped", async () => {
+    await write("offline.js", "console.error('npm error code ENOTFOUND'); process.exit(1);\n");
+    const [result] = await runChecks([{ command: "node offline.js", folder: root, rel: "", source: "config", advisory: true }], { root });
+    expect(result).toMatchObject({ passed: true, skipped: "the package registry couldn't be reached" });
   });
 });
 

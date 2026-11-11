@@ -6,7 +6,7 @@ A beginner-friendly coding agent for your terminal.
 npx coderbaba
 ```
 
-That's it. You get 5 free tries with no login. After that, type your email and the 6-digit code we send to keep going for free. No browser, password, API key, model choice or config file.
+That's it. No sign-in needed: you get 1,000 free tasks on the Fast model. Log in with your email and a 6-digit code (also free) to unlock the Smart model. No browser, password, API key, model choice or config file.
 
 ## What it does
 

@@ -31,8 +31,9 @@ beforeAll(async () => {
   await write("django/manage.py", "");
   await write("django/.venv/pyvenv.cfg", "home = /usr/bin\n");
   for (const bin of ["bin", "Scripts"]) {
-    for (const name of ["python", "python3", "pip", "python.exe", "pip.exe"]) await write(`django/.venv/${bin}/${name}`);
+    for (const name of ["python", "python3", "pip", "pip-audit", "python.exe", "pip.exe"]) await write(`django/.venv/${bin}/${name}`);
   }
+  await write("django/requirements.txt", "django==5.1\n");
   await write("nopy/manage.py", "");
   await write("tc/package.json", JSON.stringify({ scripts: { typecheck: "tsc --noEmit -p tsconfig.app.json" } }));
   await write("tcbad/package.json", JSON.stringify({ scripts: { typecheck: "tsc --noEmit && node evil.js" } }));
@@ -99,6 +100,13 @@ const runsWithoutAsking: Case[] = [
   ["python manage.py test api", { dir: "django", venv: true }, true],
   ["python manage.py makemigrations --check --dry-run", { dir: "django", venv: true }, true],
   ["python manage.py runserver 8000", { dir: "django", venv: true, via: "start_process" }, true],
+  ["npm audit", {}, true],
+  ["npm audit --json", {}, true],
+  ["npm audit --audit-level=high", {}, true],
+  ["pnpm audit --json", {}, true],
+  ["yarn audit", {}, true],
+  ["git ls-files .env", {}, true],
+  ["pip-audit -r requirements.txt --format json", { dir: "django", venv: true }, true],
 ];
 
 const asks: Case[] = [
@@ -141,6 +149,12 @@ const asks: Case[] = [
   ["python manage.py flush", { dir: "django", venv: true }, false],
   ["python manage.py runserver", { dir: "django", venv: true, via: "shell" }, false],
   ["rm -rf node_modules", {}, false],
+  ["npm audit fix", {}, false],
+  ["npm audit fix --force", {}, false],
+  ["pnpm audit --fix", {}, false],
+  ["pip-audit --fix", { dir: "django", venv: true }, false],
+  ["pip-audit -r ../../outside.txt", { dir: "django", venv: true }, false],
+  ["pip-audit -r requirements.txt", { dir: "nopy" }, false],
 ];
 
 describe("isSafeCommand", () => {

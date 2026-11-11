@@ -21,6 +21,16 @@ const GENERAL = `## Commands and servers
 - Never ask for secrets (passwords, API keys, connection strings) in chat. Use ask_secret; it saves the value to a .env file you never see. Check which variables are set with env_keys. Local-only secrets such as JWT_SECRET or SECRET_KEY: write a random value yourself with edit_file. Keep .env out of git and add a .env.example with the names only.
 - When the app runs, finish by listing every running URL.`;
 
+const SECURITY = `## Secure by default
+- Query databases with parameters or the ORM. Never build SQL or Mongo filters from raw request data; pick the allowed fields and check their types.
+- Hash passwords with bcrypt or argon2 (Django: its built-in auth). Never store or log them in plain text.
+- Routes that create, change, or delete data need an auth check. When loading a record by id, check it belongs to the current user.
+- Validate request bodies (zod, express-validator, DRF serializers) before they reach the database or the file system.
+- Don't put user data into dangerouslySetInnerHTML, innerHTML, v-html, or Django's |safe.
+- Never combine CORS origin * with credentials. Keep Django DEBUG on only through the local .env.
+- Never pass user input to shell commands or eval.
+- When the user asks whether the app is safe, suggest /security, which scans the project and writes SECURITY_REPORT.md.`;
+
 const PLANNING = `## Planning and docs
 - For tasks with more than three steps, such as building an MVP, call write_todos with the plan first. Keep exactly one item in_progress, mark items done as you go, and update the list when the plan changes. The current list appears at the end of these instructions.
 - There is no web search. When a scaffolding or install command fails on unknown flags or changed prompts, read the tool's docs or its npm or PyPI page with read_url before retrying. Check current versions with https://registry.npmjs.org/<package>/latest or https://pypi.org/pypi/<package>/json.
@@ -104,7 +114,7 @@ export function buildSystemPrompt(opts: SystemPromptOptions = {}): string {
   ]
     .filter(Boolean)
     .join("\n");
-  const sections = [BASE, context, GENERAL, PLANNING, NOTES, PYTHON, NEXT, MERN, DJANGO].map((section) => section.replaceAll("{project}", project));
+  const sections = [BASE, context, GENERAL, SECURITY, PLANNING, NOTES, PYTHON, NEXT, MERN, DJANGO].map((section) => section.replaceAll("{project}", project));
   if (opts.todos?.length) sections.push(`## Current todo list ([x] done, [>] in progress)\n${formatTodos(opts.todos)}`);
   if (opts.notes) sections.push(`## Project notes (AGENTS.md, written by the user or earlier sessions)\n${opts.notes}`);
   return sections.join("\n\n");

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { CheckSpec } from "./allow-config.js";
-import { buildCommandEnv } from "./command-env.js";
+import { buildCommandEnv, findVenv, venvBin } from "./command-env.js";
 import type { ProcessManager } from "./processes.js";
 import { isSafeCommand } from "./safe-commands.js";
 import { runShell } from "./tools.js";
@@ -10,7 +10,10 @@ const CODE_FILE = /\.(?:[cm]?[jt]sx?|vue|svelte|py)$/i;
 const JS_FILE = /\.(?:[cm]?[jt]sx?|vue|svelte)$/i;
 const SKIPPED_DIRS = new Set(["node_modules", ".git", "dist", ".next", "build", ".venv", "venv", "__pycache__"]);
 const APP_MARKERS = ["package.json", "manage.py", "pyproject.toml"];
+const DEP_FILE = /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|requirements\.txt)$/;
 const CHECK_TIMEOUT_MS = 120_000;
+const AUDIT_TIMEOUT_MS = 60_000;
+const OFFLINE = /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo|network (?:error|request)|unable to (?:reach|connect)/i;
 const FAILURE_HEAD = 1_500;
 const FAILURE_TAIL = 2_500;
 
@@ -23,6 +26,8 @@ export type PlannedCheck = {
   /** Folder relative to the project with forward slashes; "" for the root. */
   rel: string;
   source: "config" | "detected";
+  /** Dependency audits: shown to the user but never sent back to the model as a failure. */
+  advisory?: boolean;
 };
 
 export type CheckResult = PlannedCheck & { passed: boolean; skipped?: string; output: string };
@@ -118,6 +123,31 @@ async function detectedFor(dir: string, root: string, kinds: { js: boolean; py: 
   return commands;
 }
 
+/** App folders (with package.json, manage.py, or pyproject.toml) at the root and up to two levels down; the root alone when none. */
+export async function findAppFolders(root: string, depth = 2): Promise<string[]> {
+  const found: string[] = [];
+  const visit = async (dir: string, level: number) => {
+    for (const marker of APP_MARKERS) {
+      if (await exists(path.join(dir, marker))) {
+        found.push(dir);
+        break;
+      }
+    }
+    if (level >= depth) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith(".") && !SKIPPED_DIRS.has(entry.name)) await visit(path.join(dir, entry.name), level + 1);
+    }
+  };
+  await visit(root, 0);
+  return found.length ? found : [root];
+}
+
 function inSkippedDir(rel: string): boolean {
   return rel.split("/").some((part) => SKIPPED_DIRS.has(part));
 }
@@ -149,6 +179,7 @@ export async function planChecks(root: string, editedFiles: string[], settings: 
       if (rel === undefined) continue;
       add({ command: spec.command, folder, rel, source: "config" });
     }
+    for (const check of await auditChecks(root, files)) add(check);
     return planned;
   }
 
@@ -167,7 +198,33 @@ export async function planChecks(root: string, editedFiles: string[], settings: 
       add({ command, folder: dir, rel: relative(root, dir) ?? "", source: "detected" });
     }
   }
+  for (const check of await auditChecks(root, files)) add(check);
   return planned;
+}
+
+/** A dependency audit for each app folder whose package.json, lockfile, or requirements.txt changed. */
+async function auditChecks(root: string, files: { full: string; rel: string }[]): Promise<PlannedCheck[]> {
+  const checks: PlannedCheck[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (!DEP_FILE.test(file.rel)) continue;
+    const dir = await appFolder(root, file.full);
+    const python = path.basename(file.full) === "requirements.txt";
+    const folder = dir ?? path.dirname(file.full);
+    const key = `${folder}\0${python}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const rel = relative(root, folder) ?? "";
+    if (python) {
+      const venv = await findVenv(root, folder);
+      const bin = venv && path.join(venvBin(venv), process.platform === "win32" ? "pip-audit.exe" : "pip-audit");
+      if (!bin || !(await exists(bin))) continue;
+      checks.push({ command: "pip-audit -r requirements.txt", folder, rel, source: "detected", advisory: true });
+    } else if (await exists(path.join(folder, "package.json"))) {
+      checks.push({ command: `${await packageManager(folder, root)} audit --audit-level=high`, folder, rel, source: "detected", advisory: true });
+    }
+  }
+  return checks;
 }
 
 export type RunChecksOptions = {
@@ -198,9 +255,14 @@ export async function runChecks(planned: PlannedCheck[], opts: RunChecksOptions)
       if (!safe) {
         result = { ...check, passed: true, skipped: "it is not on the safe-command list", output: "" };
       } else {
-        const run = await runShell(check.command, check.folder, { timeoutMs: CHECK_TIMEOUT_MS, env, onOutput: opts.onOutput });
-        const output = run.timedOut ? `Timed out after ${CHECK_TIMEOUT_MS / 1000}s.\n${run.output}` : run.output;
-        result = { ...check, passed: run.code === 0 && !run.timedOut, output };
+        const timeoutMs = check.advisory ? AUDIT_TIMEOUT_MS : CHECK_TIMEOUT_MS;
+        const run = await runShell(check.command, check.folder, { timeoutMs, env, onOutput: opts.onOutput });
+        const output = run.timedOut ? `Timed out after ${timeoutMs / 1000}s.\n${run.output}` : run.output;
+        if (check.advisory && run.code !== 0 && (run.timedOut || OFFLINE.test(run.output))) {
+          result = { ...check, passed: true, skipped: "the package registry couldn't be reached", output };
+        } else {
+          result = { ...check, passed: run.code === 0 && !run.timedOut, output };
+        }
       }
     } catch (error) {
       result = { ...check, passed: true, skipped: error instanceof Error ? error.message : "it could not run", output: "" };
@@ -219,7 +281,7 @@ function cut(text: string): string {
 
 /** The message fed back to the model when checks fail. */
 export function failureMessage(results: CheckResult[]): string {
-  const failed = results.filter((result) => !result.passed);
+  const failed = results.filter((result) => !result.passed && !result.advisory);
   const blocks = failed.map((result) => `$ ${result.command}${result.rel ? ` (in ${result.rel}/)` : ""}\n${cut(result.output) || "(no output)"}`);
   return `Checks failed after your edits:\n\n${blocks.join("\n\n")}\n\nFix the cause, then finish. The checks run again automatically.`;
 }
