@@ -587,7 +587,7 @@ async function walk(dir: string, visit: (file: string) => Promise<void>, depth =
 
 function displayPath(root: string, full: string): string {
   const rel = path.relative(root, full);
-  return rel && !rel.startsWith("..") ? rel : full;
+  return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : full;
 }
 
 /** Project-relative folder with forward slashes; "" for the root, the full path when outside. */

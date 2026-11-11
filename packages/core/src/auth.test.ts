@@ -18,7 +18,7 @@ describe("auth file", () => {
     process.env.CODERBABA_HOME = await fs.mkdtemp(path.join(os.tmpdir(), "cb-auth-"));
     await saveAuth({ type: "anonymous", deviceId: "dev-1", token: "cb_anon_test" });
     const stat = await fs.stat(path.join(process.env.CODERBABA_HOME, "auth.json"));
-    expect(stat.mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o600);
     expect(await readAuth()).toMatchObject({ type: "anonymous", token: "cb_anon_test" });
   });
 });
