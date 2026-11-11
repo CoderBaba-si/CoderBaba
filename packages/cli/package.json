@@ -1,6 +1,6 @@
 {
   "name": "coderbaba",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Free, open-source AI coding agent for your terminal. Builds, runs, tests and security-scans your app. No sign-in or API key.",
   "license": "MIT",
   "homepage": "https://coderbaba.si",
