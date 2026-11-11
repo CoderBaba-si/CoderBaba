@@ -5,6 +5,9 @@ import { ErrorCodes, MODELS, findModel, type UsageResponse } from "@coderbabasi/
 import {
   Checkpoints,
   CoderBabaError,
+  ProcessManager,
+  activeRules,
+  askAlways,
   createLlm,
   createSession,
   dataDir,
@@ -12,20 +15,30 @@ import {
   fetchUsage,
   formatStatus,
   friendlyMessage,
+  lastLine,
   listSessions,
+  loadAllowConfig,
   logoutRemote,
+  projectSlug,
   readAuth,
+  runShell,
   runTurn,
   saveSession,
   shortenPath,
   startEmailLogin,
+  trustProject,
   usesDirectOpenRouter,
   verifyEmailLogin,
   type AgentEvent,
+  type AllowConfig,
   type AuthFile,
   type PermissionDecision,
   type PermissionRequest,
+  type ProcessInfo,
+  type SecretRequest,
   type Session,
+  type StartResult,
+  type ToolEvent,
 } from "@coderbabasi/core";
 
 type Line =
@@ -41,11 +54,13 @@ type Mode =
   | { kind: "chat" }
   | { kind: "busy" }
   | { kind: "permission"; request: PermissionRequest; resolve: (decision: PermissionDecision) => void }
+  | { kind: "secret"; request: SecretRequest; resolve: (value: string | null) => void }
+  | { kind: "trust"; rules: string[]; file: string; resolve: (trusted: boolean) => void }
   | { kind: "email"; reason: string; retry?: string }
   | { kind: "code"; email: string; masked: string; tries: number; retry?: string; sentAt: number }
   | { kind: "model" };
 
-const MAX_STEPS = 40;
+const MAX_STEPS = 80;
 const RESEND_COOLDOWN_MS = 30_000;
 
 const HELP = [
@@ -55,24 +70,106 @@ const HELP = [
   "/usage     show your free usage",
   "/model     pick Fast or Smart",
   "/undo      revert the last turn's file changes",
+  "/ps        list background processes (dev servers, databases)",
+  "/stop      stop all background processes, or /stop <name>",
+  "/restart   restart a background process: /restart <name>",
+  "/allow     show which commands run without asking",
   "/login     log in with your email (free)",
   "/logout    log out on this machine",
   "/exit      quit",
 ].join("\n");
+
+function portLabel(info: { url?: string; port?: number }): string {
+  if (info.port) return `:${info.port}`;
+  if (info.url) return info.url;
+  return "";
+}
+
+function uptime(startedAt: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function describeRestart(result: StartResult): string {
+  if (result.error) return result.error;
+  if (result.portInUse) return `${result.name} could not start: ${result.portInUse === true ? "the port" : `port ${result.portInUse}`} is already in use.`;
+  if (result.exited) return `${result.name} exited with code ${result.exited.code ?? "unknown"}.`;
+  if (result.ready) return `Restarted ${result.name}${result.url ? ` at ${result.url}` : result.port ? ` on port ${result.port}` : ""}.`;
+  return `Restarted ${result.name}; it hasn't reported ready yet.`;
+}
+
+function toolLine(tool: ToolEvent): Line | null {
+  const where = tool.cwd ? ` (in ${tool.cwd}/)` : "";
+  switch (tool.name) {
+    case "read_file":
+      return { kind: "tool", label: "Read", detail: tool.path ?? "" };
+    case "list_dir":
+      return { kind: "tool", label: "List", detail: tool.path ?? "" };
+    case "grep":
+      return { kind: "tool", label: "Search", detail: tool.pattern ?? "" };
+    case "shell":
+      return { kind: "tool", label: tool.denied ? "Skipped" : "Run", detail: `${tool.command ?? ""}${where}` };
+    case "start_process":
+    case "restart_process": {
+      const verb = tool.name === "start_process" ? "Started" : "Restarted";
+      if (tool.denied) return { kind: "tool", label: "Skipped", detail: `${tool.command ?? tool.processName ?? ""}${where}` };
+      if (tool.exited) return { kind: "tool", label: "Failed to start", detail: `${tool.processName ?? ""}  ${tool.command ?? ""}${where}` };
+      const target = tool.url ?? (tool.port ? `:${tool.port}` : "");
+      return { kind: "tool", label: verb, detail: `${tool.processName ?? ""}  ${tool.ready ? target : "(not ready yet)"}` };
+    }
+    case "read_process_output":
+      return { kind: "tool", label: "Logs", detail: tool.processName ?? "" };
+    case "stop_process":
+      return { kind: "tool", label: tool.denied ? "Not found" : "Stopped", detail: tool.processName ?? "" };
+    case "ask_secret":
+      return { kind: "tool", label: tool.denied ? "Skipped secret" : "Saved secret", detail: `${tool.secretName ?? ""} → ${tool.path ?? ""}` };
+    case "env_keys":
+      return { kind: "tool", label: "Checked", detail: tool.path ?? "" };
+    case "edit_file":
+      return {
+        kind: "tool",
+        label: tool.denied ? "Skipped edit" : "Edit",
+        detail: tool.path ?? "",
+        added: tool.added,
+        removed: tool.removed,
+        diff: tool.diffLines,
+      };
+    default:
+      return null;
+  }
+}
+
+function processSegment(running: ProcessInfo[]): string {
+  return running
+    .filter((info) => info.status === "running")
+    .map((info) => `${info.name} ${portLabel(info)}`.trim())
+    .join(" · ");
+}
 
 export function App() {
   const { exit } = useApp();
   const cwd = process.cwd();
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState("");
+  const [secretInput, setSecretInput] = useState("");
   const [mode, setMode] = useState<Mode>({ kind: "loading" });
   const [auth, setAuth] = useState<AuthFile | null>(null);
   const [direct, setDirect] = useState(usesDirectOpenRouter());
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [model, setModel] = useState("fast");
   const [streaming, setStreaming] = useState("");
+  const [progress, setProgress] = useState("");
+  const [toolStartedAt, setToolStartedAt] = useState<number | null>(null);
+  const [turnStartedAt, setTurnStartedAt] = useState(Date.now());
+  const [, setTick] = useState(0);
   const session = useRef<Session | null>(null);
   const allows = useRef(new Set<string>());
+  const secrets = useRef(new Set<string>());
+  const processes = useRef(new ProcessManager());
+  const allowConfig = useRef<AllowConfig | null>(null);
+  const quitting = useRef(false);
   const checkpoints = useRef(new Checkpoints(path.join(dataDir(), "checkpoints", Buffer.from(cwd).toString("base64url"))));
 
   const push = useCallback((line: Line) => setLines((prev) => [...prev, line]), []);
@@ -82,10 +179,92 @@ export function App() {
     setUsage(await fetchUsage(current.token));
   }, []);
 
+  useEffect(() => processes.current.on(() => setTick((tick) => tick + 1)), []);
+
+  useEffect(() => {
+    const stopNow = () => processes.current.stopAllSync();
+    const onSignal = () => {
+      stopNow();
+      process.exit(130);
+    };
+    process.on("exit", stopNow);
+    process.on("SIGTERM", onSignal);
+    process.on("SIGHUP", onSignal);
+    return () => {
+      process.off("exit", stopNow);
+      process.off("SIGTERM", onSignal);
+      process.off("SIGHUP", onSignal);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (mode.kind !== "busy") return;
+    const timer = setInterval(() => setTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [mode.kind]);
+
+  const quit = useCallback(async () => {
+    if (quitting.current) {
+      processes.current.stopAllSync();
+      process.exit(130);
+    }
+    quitting.current = true;
+    if (processes.current.running().length) {
+      push({ kind: "info", text: "Stopping background processes…" });
+      await processes.current.stopAll();
+    }
+    exit();
+  }, [exit, push]);
+
+  const checkLeftoverContainers = useCallback(async () => {
+    const slug = projectSlug(cwd);
+    const known = [
+      { name: `${slug}-mongo`, label: "MongoDB", port: 27017 },
+      { name: `${slug}-postgres`, label: "Postgres", port: 5432 },
+    ];
+    const result = await runShell(`docker ps --filter name=${known[0]!.name} --filter name=${known[1]!.name} --format {{.Names}}`, cwd, {
+      timeoutMs: 5_000,
+    });
+    if (result.code !== 0) return;
+    const names = new Set(result.output.split(/\r?\n/).map((line) => line.trim()));
+    for (const container of known) {
+      if (!names.has(container.name)) continue;
+      const procName = processes.current.running().some((info) => info.name === "db") ? `${container.label.toLowerCase()}-db` : "db";
+      processes.current.registerExternal({
+        name: procName,
+        command: `docker container ${container.name}`,
+        port: container.port,
+        stop: async () => {
+          await runShell(`docker stop ${container.name}`, cwd, { timeoutMs: 30_000 });
+        },
+      });
+      push({ kind: "info", text: `A ${container.label} container from an earlier session is still running (${container.name}). It will be reused.` });
+    }
+  }, [cwd, push]);
+
   useEffect(() => {
     void (async () => {
       await checkpoints.current.load();
       session.current = await createSession(cwd, model);
+
+      const config = await loadAllowConfig(cwd);
+      for (const warning of config.warnings) push({ kind: "error", text: warning });
+      if (config.projectRules.length && !config.trusted && config.projectHash) {
+        const trusted = await new Promise<boolean>((resolve) =>
+          setMode({ kind: "trust", rules: config.projectRules, file: shortenPath(config.projectFile), resolve }),
+        );
+        if (trusted) {
+          await trustProject(cwd, config.projectHash);
+          config.trusted = true;
+          push({ kind: "info", text: "Trusted this project's command rules." });
+        } else {
+          push({ kind: "info", text: "Ignoring this project's command rules. Those commands will ask first." });
+        }
+        setMode({ kind: "loading" });
+      }
+      allowConfig.current = config;
+      void checkLeftoverContainers();
+
       try {
         const result = await ensureAuth();
         if (!result.ok) {
@@ -111,12 +290,24 @@ export function App() {
     [],
   );
 
+  const askSecret = useCallback(
+    (request: SecretRequest) =>
+      new Promise<string | null>((resolve) => {
+        setSecretInput("");
+        setMode({ kind: "secret", request, resolve });
+      }),
+    [],
+  );
+
   const runTask = useCallback(
     async (task: string, currentAuth: AuthFile | null) => {
       const current = session.current;
       if (!current) return;
       setMode({ kind: "busy" });
       setStreaming("");
+      setProgress("");
+      setToolStartedAt(null);
+      setTurnStartedAt(Date.now());
       if (!current.title) current.title = task.slice(0, 60);
       const taskId = crypto.randomUUID();
       let text = "";
@@ -126,27 +317,21 @@ export function App() {
           setStreaming(text);
           return;
         }
+        if (event.type === "progress") {
+          setProgress(event.text);
+          setToolStartedAt((prev) => prev ?? Date.now());
+          return;
+        }
         if (text) {
           push({ kind: "assistant", text });
           text = "";
           setStreaming("");
         }
         if (event.type === "tool") {
-          const tool = event.event;
-          if (tool.name === "read_file") push({ kind: "tool", label: "Read", detail: tool.path ?? "" });
-          else if (tool.name === "list_dir") push({ kind: "tool", label: "List", detail: tool.path ?? "" });
-          else if (tool.name === "grep") push({ kind: "tool", label: "Search", detail: tool.pattern ?? "" });
-          else if (tool.name === "shell") push({ kind: "tool", label: tool.denied ? "Skipped" : "Run", detail: tool.command ?? "" });
-          else if (tool.name === "edit_file") {
-            push({
-              kind: "tool",
-              label: tool.denied ? "Skipped edit" : "Edit",
-              detail: tool.path ?? "",
-              added: tool.added,
-              removed: tool.removed,
-              diff: tool.diffLines,
-            });
-          }
+          setProgress("");
+          setToolStartedAt(null);
+          const line = toolLine(event.event);
+          if (line) push(line);
         } else if (event.type === "done") {
           push({ kind: "done", text: `Worked for ${event.seconds}s` });
         } else if (event.type === "error" && event.code !== ErrorCodes.TRIAL_EXHAUSTED) {
@@ -165,9 +350,15 @@ export function App() {
         checkpoints: checkpoints.current,
         maxSteps: MAX_STEPS,
         onEvent,
+        processes: processes.current,
+        askSecret,
+        userRules: activeRules(allowConfig.current),
+        redact: secrets.current,
       });
       if (text) push({ kind: "assistant", text });
       setStreaming("");
+      setProgress("");
+      setToolStartedAt(null);
       current.messages = result.messages;
       current.model = model;
       await saveSession(current);
@@ -182,7 +373,7 @@ export function App() {
       }
       setMode({ kind: "chat" });
     },
-    [askPermission, cwd, model, push, refreshUsage],
+    [askPermission, askSecret, cwd, model, push, refreshUsage],
   );
 
   const sendCode = useCallback(
@@ -231,9 +422,22 @@ export function App() {
     [auth, push, refreshUsage, runTask, sendCode],
   );
 
+  const showAllowRules = useCallback(() => {
+    const config = allowConfig.current;
+    const rows = [
+      "Built in: version checks, read-only file and git commands, localhost curl, npm and pip read-only commands, docker ps and logs, lsof and ps, and known dev, lint, build, and test scripts.",
+    ];
+    rows.push(config?.globalRules.length ? `Yours (global): ${config.globalRules.join(", ")}` : "Yours (global): none. Add them to ~/.coderbaba/config.json as { \"allow\": [...] }.");
+    if (config?.projectRules.length) {
+      rows.push(`This project (${config.trusted ? "trusted" : "ignored"}): ${config.projectRules.join(", ")}`);
+    }
+    if (askAlways()) rows.push("CODERBABA_ASK_ALWAYS=1 is set, so every command asks first.");
+    push({ kind: "info", text: rows.join("\n") });
+  }, [push]);
+
   const command = useCallback(
     async (raw: string) => {
-      const [name] = raw.trim().split(/\s+/);
+      const [name, arg] = raw.trim().split(/\s+/);
       switch (name) {
         case "/help":
           push({ kind: "info", text: HELP });
@@ -273,6 +477,66 @@ export function App() {
           push({ kind: "info", text: undone ? `Undid changes to ${undone.restored.length} file(s).` : "Nothing to undo." });
           return;
         }
+        case "/ps": {
+          const all = processes.current.list();
+          if (!all.length) {
+            push({ kind: "info", text: "No background processes." });
+            return;
+          }
+          push({
+            kind: "info",
+            text: all
+              .map((info) => {
+                const status = info.status === "exited" ? `exited (${info.exitCode ?? "?"})` : info.status;
+                const folder = info.folder !== "." ? ` (in ${info.folder}/)` : "";
+                return `${info.name.padEnd(8)} ${status.padEnd(12)} ${(info.url ?? portLabel(info) ?? "").padEnd(24)} ${info.command}${folder}  ${info.status === "running" ? uptime(info.startedAt) : ""}`.trimEnd();
+              })
+              .join("\n"),
+          });
+          return;
+        }
+        case "/stop": {
+          if (arg) {
+            const info = await processes.current.stop(arg);
+            push({ kind: "info", text: info ? `Stopped ${info.name}.` : `No process named ${arg}. Type /ps to see them.` });
+            return;
+          }
+          if (!processes.current.running().length) {
+            push({ kind: "info", text: "Nothing is running." });
+            return;
+          }
+          await processes.current.stopAll();
+          push({ kind: "info", text: "Stopped all background processes." });
+          return;
+        }
+        case "/restart": {
+          if (!arg) {
+            push({ kind: "info", text: "Which one? Type /restart <name>. /ps lists them." });
+            return;
+          }
+          const existing = processes.current.logs(arg)?.info;
+          if (!existing) {
+            push({ kind: "info", text: `No process named ${arg}. Type /ps to see them.` });
+            return;
+          }
+          if (existing.external) {
+            push({ kind: "info", text: `${existing.name} wasn't started by CoderBaba, so it can't be restarted here.` });
+            return;
+          }
+          setMode({ kind: "busy" });
+          setTurnStartedAt(Date.now());
+          const result = await processes.current.restart(arg, (chunk) => {
+            const line = lastLine(chunk);
+            if (line) setProgress(line);
+          });
+          setProgress("");
+          push({ kind: "info", text: result ? describeRestart(result) : `Could not restart ${arg}.` });
+          setMode({ kind: "chat" });
+          return;
+        }
+        case "/allow":
+          showAllowRules();
+          return;
         case "/login":
           setMode({ kind: "email", reason: "What's your email?" });
           return;
@@ -284,13 +548,13 @@ export function App() {
           setMode({ kind: "email", reason: "What's your email?" });
           return;
         case "/exit":
-          exit();
+          await quit();
           return;
         default:
           push({ kind: "error", text: `Unknown command ${name}. Type /help` });
       }
     },
-    [auth, cwd, direct, exit, model, push],
+    [auth, cwd, direct, model, push, quit, showAllowRules],
   );
 
   const submit = useCallback(
@@ -353,7 +617,7 @@ export function App() {
 
   useInput((char, key) => {
     if (key.ctrl && char === "c") {
-      exit();
+      void quit();
       return;
     }
     if (mode.kind === "permission") {
@@ -363,6 +627,26 @@ export function App() {
         mode.resolve(decision);
         setMode({ kind: "busy" });
       }
+      return;
+    }
+    if (mode.kind === "trust") {
+      const answer = char.toLowerCase();
+      if (answer === "y" || answer === "n") mode.resolve(answer === "y");
+      return;
+    }
+    if (mode.kind === "secret") {
+      if (key.return || key.escape) {
+        const value = key.escape ? null : secretInput || null;
+        setSecretInput("");
+        setMode({ kind: "busy" });
+        mode.resolve(value);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setSecretInput((prev) => prev.slice(0, -1));
+        return;
+      }
+      if (!key.ctrl && !key.meta && char) setSecretInput((prev) => prev + char.replace(/[\r\n]/g, ""));
       return;
     }
     if (mode.kind === "busy" || mode.kind === "loading") return;
@@ -383,7 +667,9 @@ export function App() {
   });
 
   const modelInfo = findModel(model) ?? MODELS[0]!;
-  const status = formatStatus({ modelLabel: modelInfo.label, project: shortenPath(cwd), direct, usage });
+  const servers = processSegment(processes.current.running());
+  const status = formatStatus({ modelLabel: modelInfo.label, project: shortenPath(cwd), direct, usage }) + (servers ? ` · ${servers}` : "");
+  const busySeconds = Math.max(0, Math.round((Date.now() - (toolStartedAt ?? turnStartedAt)) / 1000));
 
   return (
     <Box flexDirection="column">
@@ -394,7 +680,7 @@ export function App() {
         <LineView key={index} line={line} />
       ))}
       {streaming ? <Text>{streaming}</Text> : null}
-      <Prompt mode={mode} input={input} />
+      <Prompt mode={mode} input={input} secretLength={secretInput.length} progress={progress} seconds={busySeconds} />
       <Text dimColor>{status}</Text>
     </Box>
   );
@@ -429,11 +715,56 @@ function LineView({ line }: { line: Line }) {
   );
 }
 
-function Prompt({ mode, input }: { mode: Mode; input: string }) {
+function fitWidth(text: string): string {
+  const max = Math.max(20, (process.stdout.columns || 80) - 1);
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function Prompt({
+  mode,
+  input,
+  secretLength,
+  progress,
+  seconds,
+}: {
+  mode: Mode;
+  input: string;
+  secretLength: number;
+  progress: string;
+  seconds: number;
+}) {
   if (mode.kind === "loading") return <Text dimColor>Starting…</Text>;
-  if (mode.kind === "busy") return <Text dimColor>Working… (Ctrl+C to quit)</Text>;
+  if (mode.kind === "busy") {
+    return <Text dimColor>{fitWidth(`Working… ${seconds}s${progress ? `  ${progress}` : "  (Ctrl+C to quit)"}`)}</Text>;
+  }
   if (mode.kind === "permission") {
     return <Text color="yellow">{mode.request.summary.replace(/ Allow\?$/, "")} Allow? (y / always=a / n)</Text>;
+  }
+  if (mode.kind === "secret") {
+    const hint = mode.request.hint ? `${mode.request.hint}, ` : "";
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow">
+          Paste {mode.request.name} ({hint}input hidden, Esc to skip):
+        </Text>
+        <Text dimColor>It will be saved to {mode.request.envPath}. CoderBaba's AI never sees it.</Text>
+        <Text>
+          {"•".repeat(secretLength)}
+          <Text inverse> </Text>
+        </Text>
+      </Box>
+    );
+  }
+  if (mode.kind === "trust") {
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow">This project ({mode.file}) lets these commands run without asking:</Text>
+        {mode.rules.map((rule) => (
+          <Text key={rule}>  {rule}</Text>
+        ))}
+        <Text color="yellow">Trust them? (y / n)</Text>
+      </Box>
+    );
   }
   if (mode.kind === "model") {
     return (

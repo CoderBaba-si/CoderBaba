@@ -3,12 +3,15 @@ import { Checkpoints } from "./checkpoints.js";
 import { CoderBabaError } from "./errors.js";
 import type { Llm } from "./llm.js";
 import type { PermissionDecision, PermissionRequest } from "./permissions.js";
-import { SYSTEM_PROMPT } from "./prompt.js";
+import type { ProcessManager } from "./processes.js";
+import { buildSystemPrompt } from "./prompt.js";
+import type { AskSecret } from "./secrets.js";
 import { TOOL_DEFINITIONS, runTool, type ToolEvent } from "./tools.js";
 
 export type AgentEvent =
   | { type: "text"; text: string }
   | { type: "tool"; event: ToolEvent }
+  | { type: "progress"; text: string }
   | { type: "error"; code: string; message: string; resetAt?: string }
   | { type: "done"; seconds: number };
 
@@ -26,6 +29,10 @@ export async function runTurn(opts: {
   checkpoints: Checkpoints;
   maxSteps: number;
   onEvent: (event: AgentEvent) => void;
+  processes?: ProcessManager;
+  askSecret?: AskSecret;
+  userRules?: string[];
+  redact?: Set<string>;
 }): Promise<{ messages: ChatMessage[]; stopCode?: string }> {
   const started = Date.now();
   const messages = opts.messages.slice();
@@ -35,10 +42,11 @@ export async function runTurn(opts: {
   for (let step = 0; step < opts.maxSteps; step++) {
     let result;
     try {
+      const system = buildSystemPrompt({ root: opts.cwd, running: opts.processes?.running() });
       result = await opts.llm.chat({
         taskId: opts.taskId,
         model: opts.model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
+        messages: [{ role: "system", content: system }, ...messages],
         tools: TOOL_DEFINITIONS,
         onText: (text) => opts.onEvent({ type: "text", text }),
       });
@@ -85,6 +93,11 @@ export async function runTurn(opts: {
         checkpoints: opts.checkpoints,
         allows: opts.allows,
         askPermission: opts.askPermission,
+        processes: opts.processes,
+        askSecret: opts.askSecret,
+        userRules: opts.userRules,
+        redact: opts.redact,
+        onProgress: (text) => opts.onEvent({ type: "progress", text }),
       });
       opts.onEvent({ type: "tool", event: outcome.event });
       messages.push({ role: "tool", tool_call_id: call.id, content: outcome.content });
