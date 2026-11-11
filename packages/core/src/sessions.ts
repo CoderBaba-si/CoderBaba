@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ChatMessage } from "@coderbabasi/shared";
 import { dataDir } from "./auth.js";
+import type { Todo } from "./tools.js";
 
 export type Session = {
   id: string;
@@ -11,6 +12,7 @@ export type Session = {
   updatedAt: string;
   messages: ChatMessage[];
   title?: string;
+  todos?: Todo[];
 };
 
 function sessionsDir(): string {

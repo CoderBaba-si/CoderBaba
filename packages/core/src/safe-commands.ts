@@ -157,12 +157,14 @@ async function scriptAllowed(scriptName: string, ctx: Ctx): Promise<boolean> {
       return /^(?:next build(?: --turbopack| --turbo)?|vite build|tsc -b && vite build)$/.test(script);
     case "test":
       return /^(?:vitest(?: run)?|jest)(?: --[\w-]+(?:=\S+)?)*$/.test(script);
+    case "typecheck":
+      return /^(?:tsc|vue-tsc)(?: (?:--noEmit|-b|--build|(?:-p|--project) [\w./-]+))*$/.test(script) && /--noEmit|-b\b|--build/.test(script);
     default:
       return false;
   }
 }
 
-const SCRIPT_NAMES = new Set(["dev", "start", "lint", "build", "test"]);
+const SCRIPT_NAMES = new Set(["dev", "start", "lint", "build", "test", "typecheck"]);
 const PKG_NAME = /^(?:@[\w.-]+\/)?[\w.-]+(?:@[\w.^~<>=-]+)?$/;
 
 const npmRule: Rule = async (args, ctx) => {

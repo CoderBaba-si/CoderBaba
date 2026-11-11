@@ -4,9 +4,16 @@ import path from "node:path";
 import { dataDir } from "./auth.js";
 import { hasShellMeta } from "./safe-commands.js";
 
+/** A check from config: run command (in cwd, relative to the project) when an edited file matches files. */
+export type CheckSpec = { command: string; files?: string; cwd?: string };
+
 export type AllowConfig = {
   globalRules: string[];
   projectRules: string[];
+  globalChecks: CheckSpec[];
+  projectChecks: CheckSpec[];
+  /** "checks": false in either file turns automatic checks off. */
+  checksDisabled: boolean;
   projectFile: string;
   projectHash?: string;
   trusted: boolean;
@@ -33,16 +40,42 @@ async function readMaybe(file: string): Promise<string | undefined> {
   }
 }
 
-function parseRules(raw: string | undefined, file: string, warnings: string[]): string[] {
-  if (raw === undefined) return [];
+type Parsed = { rules: string[]; checks: CheckSpec[]; checksDisabled: boolean };
+
+function parseChecks(value: unknown): { checks: CheckSpec[]; disabled: boolean } {
+  if (value === undefined) return { checks: [], disabled: false };
+  if (value === false) return { checks: [], disabled: true };
+  if (!Array.isArray(value)) throw new Error("checks is not a list");
+  const checks = value.flatMap((item): CheckSpec[] => {
+    if (!item || typeof item !== "object") return [];
+    const { command, files, cwd } = item as Record<string, unknown>;
+    if (typeof command !== "string" || !command.trim() || hasShellMeta(command)) return [];
+    return [
+      {
+        command: command.trim(),
+        files: typeof files === "string" && files.trim() ? files.trim() : undefined,
+        cwd: typeof cwd === "string" && cwd.trim() ? cwd.trim() : undefined,
+      },
+    ];
+  });
+  return { checks, disabled: false };
+}
+
+function parseConfig(raw: string | undefined, file: string, warnings: string[]): Parsed {
+  const empty: Parsed = { rules: [], checks: [], checksDisabled: false };
+  if (raw === undefined) return empty;
   try {
-    const parsed = JSON.parse(raw) as { allow?: unknown };
-    if (parsed.allow === undefined) return [];
-    if (!Array.isArray(parsed.allow)) throw new Error("allow is not a list");
-    return parsed.allow.filter((rule): rule is string => typeof rule === "string" && rule.trim() !== "" && !hasShellMeta(rule));
+    const parsed = JSON.parse(raw) as { allow?: unknown; checks?: unknown };
+    let rules: string[] = [];
+    if (parsed.allow !== undefined) {
+      if (!Array.isArray(parsed.allow)) throw new Error("allow is not a list");
+      rules = parsed.allow.filter((rule): rule is string => typeof rule === "string" && rule.trim() !== "" && !hasShellMeta(rule));
+    }
+    const { checks, disabled } = parseChecks(parsed.checks);
+    return { rules, checks, checksDisabled: disabled };
   } catch {
-    warnings.push(`Ignored ${file}: it is not valid JSON with an "allow" list.`);
-    return [];
+    warnings.push(`Ignored ${file}: it is not valid JSON with an "allow" list and an optional "checks" list.`);
+    return empty;
   }
 }
 
@@ -64,16 +97,25 @@ async function realRoot(root: string): Promise<string> {
 
 export async function loadAllowConfig(root: string): Promise<AllowConfig> {
   const warnings: string[] = [];
-  const globalRules = parseRules(await readMaybe(globalConfigPath()), globalConfigPath(), warnings);
+  const global = parseConfig(await readMaybe(globalConfigPath()), globalConfigPath(), warnings);
   const projectFile = projectAllowPath(root);
   const projectRaw = await readMaybe(projectFile);
-  const projectRules = parseRules(projectRaw, projectFile, warnings);
-  if (projectRaw === undefined || projectRules.length === 0) {
-    return { globalRules, projectRules, projectFile, trusted: true, warnings };
+  const project = parseConfig(projectRaw, projectFile, warnings);
+  const base = {
+    globalRules: global.rules,
+    projectRules: project.rules,
+    globalChecks: global.checks,
+    projectChecks: project.checks,
+    checksDisabled: global.checksDisabled || project.checksDisabled,
+    projectFile,
+    warnings,
+  };
+  if (projectRaw === undefined || (project.rules.length === 0 && project.checks.length === 0)) {
+    return { ...base, trusted: true };
   }
   const projectHash = createHash("sha256").update(projectRaw).digest("hex");
   const trust = await readTrust();
-  return { globalRules, projectRules, projectFile, projectHash, trusted: trust[await realRoot(root)] === projectHash, warnings };
+  return { ...base, projectHash, trusted: trust[await realRoot(root)] === projectHash };
 }
 
 export async function trustProject(root: string, hash: string): Promise<void> {
@@ -86,4 +128,10 @@ export async function trustProject(root: string, hash: string): Promise<void> {
 export function activeRules(config: AllowConfig | null | undefined): string[] {
   if (!config) return [];
   return config.trusted ? [...config.globalRules, ...config.projectRules] : [...config.globalRules];
+}
+
+export function activeChecks(config: AllowConfig | null | undefined): { configured: CheckSpec[]; disabled: boolean } {
+  if (!config) return { configured: [], disabled: false };
+  const configured = config.trusted ? [...config.globalChecks, ...config.projectChecks] : [...config.globalChecks];
+  return { configured, disabled: config.checksDisabled };
 }

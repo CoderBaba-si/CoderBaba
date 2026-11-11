@@ -1,23 +1,32 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { ChatMessage, ToolCall } from "@coderbabasi/shared";
+import type { BrowserSession } from "./browser.js";
 import { Checkpoints } from "./checkpoints.js";
+import { failureMessage, planChecks, runChecks, type CheckSettings } from "./checks.js";
+import { fitContext } from "./context.js";
+import { createProgressReporter, redact } from "./output.js";
 import { CoderBabaError } from "./errors.js";
 import type { Llm } from "./llm.js";
 import type { PermissionDecision, PermissionRequest } from "./permissions.js";
 import type { ProcessManager } from "./processes.js";
+import { loadProjectNotes } from "./project-notes.js";
 import { buildSystemPrompt } from "./prompt.js";
 import type { AskSecret } from "./secrets.js";
-import { TOOL_DEFINITIONS, runTool, type ToolEvent } from "./tools.js";
+import { TOOL_DEFINITIONS, runTool, type Todo, type ToolEvent } from "./tools.js";
 
 export type AgentEvent =
   | { type: "text"; text: string }
   | { type: "tool"; event: ToolEvent }
   | { type: "progress"; text: string }
+  | { type: "compacted"; before: number; after: number; summarized: boolean }
   | { type: "error"; code: string; message: string; resetAt?: string }
   | { type: "done"; seconds: number };
 
 const MAX_CONTINUES = 3;
+const MAX_CHECK_ROUNDS = 2;
 
-export async function runTurn(opts: {
+export type TurnOptions = {
   task: string;
   cwd: string;
   model: string;
@@ -33,16 +42,36 @@ export async function runTurn(opts: {
   askSecret?: AskSecret;
   userRules?: string[];
   redact?: Set<string>;
-}): Promise<{ messages: ChatMessage[]; stopCode?: string }> {
+  /** Automatic checks after edits. Detection is on when omitted. */
+  checks?: CheckSettings;
+  browser?: BrowserSession;
+  /** The session's todo list, shown to the model and replaced by write_todos. */
+  todos?: { items: Todo[] };
+};
+
+export async function runTurn(opts: TurnOptions): Promise<{ messages: ChatMessage[]; stopCode?: string }> {
   const started = Date.now();
   const messages = opts.messages.slice();
   messages.push({ role: "user", content: opts.task });
   let continues = 0;
+  const edited = new Set<string>();
+  let checkRounds = 0;
+  const root = realRoot(opts.cwd);
 
   for (let step = 0; step < opts.maxSteps; step++) {
+    const fitted = await fitContext(messages, { llm: opts.llm, taskId: opts.taskId, model: opts.model, task: opts.task });
+    messages.splice(0, messages.length, ...fitted.messages);
+    if (fitted.compacted) {
+      opts.onEvent({ type: "compacted", before: fitted.compacted.before, after: fitted.compacted.after, summarized: fitted.compacted.summarized });
+    }
     let result;
     try {
-      const system = buildSystemPrompt({ root: opts.cwd, running: opts.processes?.running() });
+      const system = buildSystemPrompt({
+        root: opts.cwd,
+        running: opts.processes?.running(),
+        notes: loadProjectNotes(opts.cwd),
+        todos: opts.todos?.items,
+      });
       result = await opts.llm.chat({
         taskId: opts.taskId,
         model: opts.model,
@@ -66,6 +95,15 @@ export async function runTurn(opts: {
 
     if (result.toolCalls.length === 0) {
       messages.push({ role: "assistant", content: result.content });
+      if (edited.size && checkRounds <= MAX_CHECK_ROUNDS) {
+        const failed = await runEndChecks(opts, root, [...edited]);
+        if (failed && checkRounds < MAX_CHECK_ROUNDS) {
+          checkRounds += 1;
+          messages.push({ role: "user", content: failed });
+          continue;
+        }
+        checkRounds = MAX_CHECK_ROUNDS + 1;
+      }
       opts.onEvent({ type: "done", seconds: elapsed(started) });
       return { messages };
     }
@@ -97,9 +135,12 @@ export async function runTurn(opts: {
         askSecret: opts.askSecret,
         userRules: opts.userRules,
         redact: opts.redact,
+        browser: opts.browser,
+        todos: opts.todos,
         onProgress: (text) => opts.onEvent({ type: "progress", text }),
       });
       opts.onEvent({ type: "tool", event: outcome.event });
+      if (outcome.event.name === "edit_file" && outcome.event.file && !outcome.event.denied) edited.add(outcome.event.file);
       messages.push({ role: "tool", tool_call_id: call.id, content: outcome.content });
     }
   }
@@ -107,6 +148,35 @@ export async function runTurn(opts: {
   opts.onEvent({ type: "error", code: "STEP_LIMIT", message: "Stopped after the step limit." });
   opts.onEvent({ type: "done", seconds: elapsed(started) });
   return { messages };
+}
+
+function realRoot(cwd: string): string {
+  try {
+    return fs.realpathSync(path.resolve(cwd));
+  } catch {
+    return path.resolve(cwd);
+  }
+}
+
+/** Run the checks for the edited files. Returns the message for the model when any failed. */
+async function runEndChecks(opts: TurnOptions, root: string, files: string[]): Promise<string | undefined> {
+  const planned = await planChecks(root, files, opts.checks ?? { configured: [], disabled: false });
+  if (!planned.length) return undefined;
+  const progress = createProgressReporter((text) => opts.onEvent({ type: "progress", text }));
+  const results = await runChecks(planned, {
+    root,
+    userRules: opts.userRules,
+    processes: opts.processes,
+    onOutput: progress.push,
+    onResult: (result) =>
+      opts.onEvent({
+        type: "tool",
+        event: { name: "check", command: result.command, cwd: result.rel, passed: result.passed, denied: Boolean(result.skipped), note: result.skipped },
+      }),
+  });
+  progress.stop();
+  const failed = results.some((result) => !result.passed);
+  return failed ? redact(failureMessage(results), opts.redact) : undefined;
 }
 
 function elapsed(started: number): number {

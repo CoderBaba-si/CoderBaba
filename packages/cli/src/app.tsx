@@ -7,17 +7,29 @@ import {
   CoderBabaError,
   ProcessManager,
   activeRules,
+  BrowserSession,
+  activeChecks,
   askAlways,
+  compact,
   createLlm,
   createSession,
   dataDir,
   ensureAuth,
+  INIT_TASK,
+  NOTES_FILE,
+  chatMarkdown,
+  exportChat,
+  formatTodos,
+  redact,
+  runUserCommand,
+  type Todo,
   fetchUsage,
   formatStatus,
   friendlyMessage,
   lastLine,
   listSessions,
   loadAllowConfig,
+  loadProjectNotes,
   logoutRemote,
   projectSlug,
   readAuth,
@@ -70,6 +82,10 @@ const HELP = [
   "/usage     show your free usage",
   "/model     pick Fast or Smart",
   "/undo      revert the last turn's file changes",
+  "/compact   summarize the chat so far to free up room",
+  "/init      write AGENTS.md, notes that help CoderBaba understand this project",
+  "/todos     show this chat's todo list",
+  "/export    save this chat as a Markdown file in the project",
   "/ps        list background processes (dev servers, databases)",
   "/stop      stop all background processes, or /stop <name>",
   "/restart   restart a background process: /restart <name>",
@@ -77,6 +93,9 @@ const HELP = [
   "/login     log in with your email (free)",
   "/logout    log out on this machine",
   "/exit      quit",
+  "",
+  "!command   run a command yourself, such as !npm test; CoderBaba sees the output next time",
+  "While CoderBaba works, type and press Enter to queue your next message (Esc clears the queue).",
 ].join("\n");
 
 function portLabel(info: { url?: string; port?: number }): string {
@@ -127,6 +146,18 @@ function toolLine(tool: ToolEvent): Line | null {
       return { kind: "tool", label: tool.denied ? "Skipped secret" : "Saved secret", detail: `${tool.secretName ?? ""} → ${tool.path ?? ""}` };
     case "env_keys":
       return { kind: "tool", label: "Checked", detail: tool.path ?? "" };
+    case "read_url":
+      return { kind: "tool", label: tool.denied ? "Could not read" : "Read", detail: `${tool.url ?? ""}${tool.note ? ` (${tool.note})` : ""}` };
+    case "write_todos":
+      return { kind: "tool", label: "Todos", detail: tool.note ?? "" };
+    case "check_page": {
+      if (tool.denied) return { kind: "tool", label: "Skipped page check", detail: tool.url ?? "" };
+      const result = tool.passed ? "no errors" : (tool.note ?? "problems found");
+      return { kind: "tool", label: tool.passed ? "Checked page" : "Page problems", detail: `${tool.url ?? ""}  ${result}${tool.path ? `, screenshot ${tool.path}` : ""}` };
+    }
+    case "check":
+      if (tool.denied) return { kind: "tool", label: "Skipped check", detail: `${tool.command ?? ""}${where}${tool.note ? `: ${tool.note}` : ""}` };
+      return { kind: "tool", label: tool.passed ? "Checked" : "Check failed", detail: `${tool.command ?? ""}${where}` };
     case "edit_file":
       return {
         kind: "tool",
@@ -139,6 +170,29 @@ function toolLine(tool: ToolEvent): Line | null {
     default:
       return null;
   }
+}
+
+const BANG_SHOWN_LINES = 60;
+const BANG_KEPT_CHARS = 8_000;
+
+function tailLines(text: string, count: number): string {
+  const lines = text.split(/\r?\n/);
+  return lines.length > count ? `… (${lines.length - count} earlier lines)\n${lines.slice(-count).join("\n")}` : text;
+}
+
+function cutMiddle(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const half = Math.floor(max / 2);
+  return `${text.slice(0, half)}\n… output cut …\n${text.slice(-half)}`;
+}
+
+function thousands(chars: number): string {
+  return chars >= 1000 ? `${Math.round(chars / 1000)}k` : String(chars);
+}
+
+function compactedText(before: number, after: number, summarized: boolean): string {
+  const how = summarized ? "Compacted the chat" : "Trimmed older messages from the chat";
+  return `${how}: ${thousands(before)} -> ${thousands(after)} characters.`;
 }
 
 function processSegment(running: ProcessInfo[]): string {
@@ -164,10 +218,13 @@ export function App() {
   const [toolStartedAt, setToolStartedAt] = useState<number | null>(null);
   const [turnStartedAt, setTurnStartedAt] = useState(Date.now());
   const [, setTick] = useState(0);
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [queue, setQueue] = useState<string[]>([]);
   const session = useRef<Session | null>(null);
   const allows = useRef(new Set<string>());
   const secrets = useRef(new Set<string>());
   const processes = useRef(new ProcessManager());
+  const browser = useRef(new BrowserSession());
   const allowConfig = useRef<AllowConfig | null>(null);
   const quitting = useRef(false);
   const checkpoints = useRef(new Checkpoints(path.join(dataDir(), "checkpoints", Buffer.from(cwd).toString("base64url"))));
@@ -180,6 +237,7 @@ export function App() {
   }, []);
 
   useEffect(() => processes.current.on(() => setTick((tick) => tick + 1)), []);
+  useEffect(() => processes.current.addCleanup(() => browser.current.close()), []);
 
   useEffect(() => {
     const stopNow = () => processes.current.stopAllSync();
@@ -209,10 +267,8 @@ export function App() {
       process.exit(130);
     }
     quitting.current = true;
-    if (processes.current.running().length) {
-      push({ kind: "info", text: "Stopping background processes…" });
-      await processes.current.stopAll();
-    }
+    if (processes.current.running().length) push({ kind: "info", text: "Stopping background processes…" });
+    await processes.current.stopAll();
     exit();
   }, [exit, push]);
 
@@ -249,9 +305,10 @@ export function App() {
 
       const config = await loadAllowConfig(cwd);
       for (const warning of config.warnings) push({ kind: "error", text: warning });
-      if (config.projectRules.length && !config.trusted && config.projectHash) {
+      if ((config.projectRules.length || config.projectChecks.length) && !config.trusted && config.projectHash) {
+        const rules = [...config.projectRules, ...config.projectChecks.map((check) => `${check.command} (as a check after edits)`)];
         const trusted = await new Promise<boolean>((resolve) =>
-          setMode({ kind: "trust", rules: config.projectRules, file: shortenPath(config.projectFile), resolve }),
+          setMode({ kind: "trust", rules, file: shortenPath(config.projectFile), resolve }),
         );
         if (trusted) {
           await trustProject(cwd, config.projectHash);
@@ -310,6 +367,7 @@ export function App() {
       setTurnStartedAt(Date.now());
       if (!current.title) current.title = task.slice(0, 60);
       const taskId = crypto.randomUUID();
+      const todoList = { items: current.todos ?? [] };
       let text = "";
       const onEvent = (event: AgentEvent) => {
         if (event.type === "text") {
@@ -327,9 +385,12 @@ export function App() {
           text = "";
           setStreaming("");
         }
-        if (event.type === "tool") {
+        if (event.type === "compacted") {
+          push({ kind: "info", text: compactedText(event.before, event.after, event.summarized) });
+        } else if (event.type === "tool") {
           setProgress("");
           setToolStartedAt(null);
+          if (event.event.name === "write_todos") setTodos([...todoList.items]);
           const line = toolLine(event.event);
           if (line) push(line);
         } else if (event.type === "done") {
@@ -354,7 +415,11 @@ export function App() {
         askSecret,
         userRules: activeRules(allowConfig.current),
         redact: secrets.current,
+        checks: activeChecks(allowConfig.current),
+        browser: browser.current,
+        todos: todoList,
       });
+      current.todos = todoList.items;
       if (text) push({ kind: "assistant", text });
       setStreaming("");
       setProgress("");
@@ -431,6 +496,10 @@ export function App() {
     if (config?.projectRules.length) {
       rows.push(`This project (${config.trusted ? "trusted" : "ignored"}): ${config.projectRules.join(", ")}`);
     }
+    const checks = activeChecks(config);
+    if (checks.disabled) rows.push("Checks after edits: off (\"checks\": false).");
+    else if (checks.configured.length) rows.push(`Checks after edits: ${checks.configured.map((check) => check.command).join(", ")}`);
+    else rows.push("Checks after edits: detected per app folder (typecheck, lint, and Django's manage.py check).");
     if (askAlways()) rows.push("CODERBABA_ASK_ALWAYS=1 is set, so every command asks first.");
     push({ kind: "info", text: rows.join("\n") });
   }, [push]);
@@ -445,6 +514,7 @@ export function App() {
         case "/new":
           session.current = await createSession(cwd, model);
           setLines([]);
+          setTodos([]);
           push({ kind: "info", text: "Started a new chat." });
           return;
         case "/history": {
@@ -537,6 +607,62 @@ export function App() {
         case "/allow":
           showAllowRules();
           return;
+        case "/todos": {
+          const items = session.current?.todos ?? [];
+          push({ kind: "info", text: items.length ? formatTodos(items) : "No todos in this chat yet. CoderBaba writes them for bigger tasks." });
+          return;
+        }
+        case "/export": {
+          const current = session.current;
+          if (!current?.messages.length) {
+            push({ kind: "info", text: "Nothing to export yet." });
+            return;
+          }
+          const file = await exportChat(cwd, chatMarkdown(current.messages, { title: current.title, secrets: secrets.current }));
+          push({ kind: "info", text: `Saved this chat to ${path.relative(cwd, file)}.` });
+          return;
+        }
+        case "/init": {
+          const currentAuth = auth ?? (await readAuth());
+          if (!currentAuth && !direct) {
+            setMode({ kind: "email", reason: "Enter your email to keep going (still free)", retry: INIT_TASK });
+            return;
+          }
+          push({ kind: "info", text: `${loadProjectNotes(cwd) ? "Updating" : "Writing"} ${NOTES_FILE} with notes about this project…` });
+          await runTask(INIT_TASK, currentAuth);
+          return;
+        }
+        case "/compact": {
+          const current = session.current;
+          const currentAuth = auth ?? (await readAuth());
+          if (!current || !current.messages.length) {
+            push({ kind: "info", text: "Nothing to compact yet." });
+            return;
+          }
+          if (!currentAuth && !direct) {
+            push({ kind: "info", text: "Log in first (free). Type /login" });
+            return;
+          }
+          setMode({ kind: "busy" });
+          setTurnStartedAt(Date.now());
+          setProgress("summarizing the chat");
+          const result = await compact(current.messages, {
+            llm: createLlm(currentAuth?.token),
+            taskId: crypto.randomUUID(),
+            model,
+            force: true,
+          });
+          setProgress("");
+          if (!result) {
+            push({ kind: "info", text: "The chat is already as short as it can be." });
+          } else {
+            current.messages = result.messages;
+            await saveSession(current);
+            push({ kind: "info", text: compactedText(result.before, result.after, result.summarized) });
+          }
+          setMode({ kind: "chat" });
+          return;
+        }
         case "/login":
           setMode({ kind: "email", reason: "What's your email?" });
           return;
@@ -554,7 +680,38 @@ export function App() {
           push({ kind: "error", text: `Unknown command ${name}. Type /help` });
       }
     },
-    [auth, cwd, direct, model, push, quit, showAllowRules],
+    [auth, cwd, direct, model, push, quit, runTask, showAllowRules],
+  );
+
+  const runBang = useCallback(
+    async (commandText: string) => {
+      if (!commandText) {
+        push({ kind: "info", text: "Type a command after !, such as !npm test." });
+        return;
+      }
+      push({ kind: "user", text: `!${commandText}` });
+      setMode({ kind: "busy" });
+      setTurnStartedAt(Date.now());
+      setProgress("");
+      const result = await runUserCommand(commandText, {
+        cwd,
+        onOutput: (chunk) => {
+          const line = lastLine(chunk);
+          if (line) setProgress(line);
+        },
+      });
+      setProgress("");
+      const output = redact(result.output.trim(), secrets.current);
+      const status = result.timedOut ? "Timed out after 600s and was stopped." : `(exit ${result.code})`;
+      push({ kind: "info", text: [tailLines(output, BANG_SHOWN_LINES), status].filter(Boolean).join("\n") });
+      const current = session.current;
+      if (current) {
+        current.messages.push({ role: "user", content: `I ran: ${commandText}\n${cutMiddle(output, BANG_KEPT_CHARS)}\n${status}` });
+        await saveSession(current);
+      }
+      setMode({ kind: "chat" });
+    },
+    [cwd, push],
   );
 
   const submit = useCallback(
@@ -604,6 +761,10 @@ export function App() {
         await command(text);
         return;
       }
+      if (text.startsWith("!")) {
+        await runBang(text.slice(1).trim());
+        return;
+      }
       push({ kind: "user", text });
       const current = auth ?? (await readAuth());
       if (!current && !direct) {
@@ -612,8 +773,15 @@ export function App() {
       }
       await runTask(text, current);
     },
-    [auth, command, direct, mode, push, runTask, sendCode, verifyCode],
+    [auth, command, direct, mode, push, runBang, runTask, sendCode, verifyCode],
   );
+
+  useEffect(() => {
+    if (mode.kind !== "chat" || !queue.length) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void submit(next!);
+  }, [mode.kind, queue, submit]);
 
   useInput((char, key) => {
     if (key.ctrl && char === "c") {
@@ -649,7 +817,19 @@ export function App() {
       if (!key.ctrl && !key.meta && char) setSecretInput((prev) => prev + char.replace(/[\r\n]/g, ""));
       return;
     }
-    if (mode.kind === "busy" || mode.kind === "loading") return;
+    if (mode.kind === "loading") return;
+    if (mode.kind === "busy") {
+      if (key.return) {
+        const text = input.trim();
+        if (text) setQueue((prev) => [...prev, text]);
+        setInput("");
+      } else if (key.escape) {
+        setQueue([]);
+        setInput("");
+      } else if (key.backspace || key.delete) setInput((prev) => prev.slice(0, -1));
+      else if (!key.ctrl && !key.meta && char) setInput((prev) => prev + char);
+      return;
+    }
     if (key.return) {
       void submit(input);
       return;
@@ -680,7 +860,7 @@ export function App() {
         <LineView key={index} line={line} />
       ))}
       {streaming ? <Text>{streaming}</Text> : null}
-      <Prompt mode={mode} input={input} secretLength={secretInput.length} progress={progress} seconds={busySeconds} />
+      <Prompt mode={mode} input={input} secretLength={secretInput.length} progress={progress} seconds={busySeconds} todos={todos} queue={queue} />
       <Text dimColor>{status}</Text>
     </Box>
   );
@@ -720,22 +900,63 @@ function fitWidth(text: string): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+const TODOS_SHOWN = 8;
+
+function TodoList({ todos }: { todos: Todo[] }) {
+  if (!todos.length) return null;
+  const done = todos.filter((todo) => todo.status === "done");
+  const open = todos.filter((todo) => todo.status !== "done");
+  const shown = todos.length <= TODOS_SHOWN ? todos : open.slice(0, TODOS_SHOWN - 1);
+  return (
+    <Box flexDirection="column">
+      {todos.length > TODOS_SHOWN ? <Text dimColor>{done.length} of {todos.length} done</Text> : null}
+      {shown.map((todo, index) => (
+        <Text key={index} dimColor={todo.status === "done"} color={todo.status === "in_progress" ? "cyan" : undefined}>
+          {fitWidth(`${todo.status === "done" ? "✓" : todo.status === "in_progress" ? "›" : "·"} ${todo.text}`)}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
 function Prompt({
   mode,
   input,
   secretLength,
   progress,
   seconds,
+  todos,
+  queue,
 }: {
   mode: Mode;
   input: string;
   secretLength: number;
   progress: string;
   seconds: number;
+  todos: Todo[];
+  queue: string[];
 }) {
   if (mode.kind === "loading") return <Text dimColor>Starting…</Text>;
   if (mode.kind === "busy") {
-    return <Text dimColor>{fitWidth(`Working… ${seconds}s${progress ? `  ${progress}` : "  (Ctrl+C to quit)"}`)}</Text>;
+    return (
+      <Box flexDirection="column">
+        <TodoList todos={todos} />
+        {queue.map((item, index) => (
+          <Text key={index} dimColor>
+            {fitWidth(`Queued: ${item}`)}
+          </Text>
+        ))}
+        <Text dimColor>{fitWidth(`Working… ${seconds}s${progress ? `  ${progress}` : "  (type to queue a message, Ctrl+C to quit)"}`)}</Text>
+        {input ? (
+          <Text>
+            <Text color="green">❯ </Text>
+            {input}
+            <Text inverse> </Text>
+            <Text dimColor>  Enter to queue, Esc to clear</Text>
+          </Text>
+        ) : null}
+      </Box>
+    );
   }
   if (mode.kind === "permission") {
     return <Text color="yellow">{mode.request.summary.replace(/ Allow\?$/, "")} Allow? (y / always=a / n)</Text>;

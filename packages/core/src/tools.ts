@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { checkPage, describePageCheck, isLocalPageUrl, problemCount, type BrowserSession, type PageCheck } from "./browser.js";
 import { applyExactEdit } from "./edit.js";
 import type { Checkpoints } from "./checkpoints.js";
 import { buildCommandEnv, secretValues, type CommandEnv } from "./command-env.js";
@@ -10,6 +11,7 @@ import { killTree, shellSpawn } from "./platform.js";
 import type { ProcessManager, StartResult, WaitFor } from "./processes.js";
 import { isSafeCommand } from "./safe-commands.js";
 import { SECRET_NAME, ensureEnvIgnored, envKeys, setEnvValue, type AskSecret } from "./secrets.js";
+import { fetchPublicPage, isDocsHost, pageSlice, type FetchOptions, type FetchedPage } from "./web.js";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -45,6 +47,12 @@ export type ToolEvent = {
   ready?: boolean;
   exited?: boolean;
   secretName?: string;
+  /** Absolute path of a file edit_file changed. */
+  file?: string;
+  /** Result of an automatic check. */
+  passed?: boolean;
+  /** Short extra detail, such as why a check was skipped. */
+  note?: string;
 };
 
 export type ToolOptions = {
@@ -62,6 +70,12 @@ export type ToolOptions = {
   /** Secret values entered this session; they are replaced in every tool result. */
   redact?: Set<string>;
   onProgress?: (line: string) => void;
+  /** Overrides for read_url's fetch and DNS lookup. */
+  web?: FetchOptions;
+  /** Headless browser for check_page. */
+  browser?: BrowserSession;
+  /** The session's todo list; write_todos replaces items. */
+  todos?: { items: Todo[] };
 };
 
 type Outcome = { content: string; event: ToolEvent };
@@ -101,6 +115,12 @@ function dispatch(opts: ToolOptions): Promise<Outcome> {
       return askSecret(opts);
     case "env_keys":
       return envKeysTool(opts);
+    case "read_url":
+      return readUrl(opts);
+    case "check_page":
+      return checkPageTool(opts);
+    case "write_todos":
+      return writeTodos(opts);
     default:
       return Promise.resolve({ content: `Unknown tool ${opts.name}`, event: { name: opts.name, denied: true } });
   }
@@ -237,6 +257,7 @@ async function editFile(opts: ToolOptions): Promise<Outcome> {
     event: {
       name: "edit_file",
       path: shown,
+      file: resolved.full,
       added: edited.diff.added,
       removed: edited.diff.removed,
       diffLines: edited.diff.lines,
@@ -485,6 +506,124 @@ async function restartProcess(opts: ToolOptions): Promise<Outcome> {
   progress.stop();
   if (!result) return notFound(opts, name, "restart_process");
   return startOutcome(result, [], "restart_process", existing.command, existing.folder === "." ? "" : existing.folder, "Restarted");
+}
+
+async function checkPageTool(opts: ToolOptions): Promise<Outcome> {
+  const url = String(opts.args.url ?? "").trim();
+  if (!isLocalPageUrl(url)) {
+    return {
+      content: "check_page only opens local pages, such as http://localhost:5173/. Use read_url for public pages.",
+      event: { name: "check_page", url, denied: true },
+    };
+  }
+  if (!opts.browser) return { content: "Page checks are not available here. Use curl instead.", event: { name: "check_page", url, denied: true } };
+  let browser = await opts.browser.get();
+  if (!browser) {
+    const ok = await permit(opts, {
+      kind: "download",
+      what: "chromium",
+      summary: "CoderBaba needs a browser to check the page, and Chrome and Edge were not found. Download Chromium (about 150 MB) with Playwright? Allow?",
+    });
+    if (!ok) return { content: "No browser is available and the user declined the download. Check the page with curl instead.", event: { name: "check_page", url, denied: true } };
+    const progress = createProgressReporter(opts.onProgress);
+    const installed = await opts.browser.install(progress.push);
+    progress.stop();
+    browser = installed.ok ? await opts.browser.get() : undefined;
+    if (!browser) {
+      const tail = installed.output.trim().split(/\r?\n/).slice(-5).join("\n");
+      return { content: `Could not set up a browser. Check the page with curl instead.${tail ? `\n${tail}` : ""}`, event: { name: "check_page", url, denied: true } };
+    }
+  }
+  const resolved = await resolveInProject(opts.cwd, ".");
+  let screenshotPath: string | undefined;
+  if (opts.args.screenshot === true) {
+    const dir = path.join(resolved.root, ".coderbaba", "screenshots");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, ".gitignore"), "*\n", "utf8");
+    screenshotPath = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
+  }
+  const progress = createProgressReporter(opts.onProgress);
+  progress.push(`opening ${url} in ${opts.browser.kind ?? "the browser"}`);
+  let check: PageCheck;
+  try {
+    check = await checkPage(browser, { url, waitForText: optString(opts.args.wait_for_text), screenshotPath });
+  } catch (error) {
+    progress.stop();
+    const message = error instanceof Error ? error.message.split("\n")[0]! : "The page could not be loaded.";
+    return { content: `Could not load ${url}: ${message}. Is the dev server running? Check read_process_output.`, event: { name: "check_page", url, passed: false, note: "did not load" } };
+  }
+  progress.stop();
+  if (check.screenshot) check.screenshot = displayPath(resolved.root, check.screenshot);
+  const problems = problemCount(check);
+  return {
+    content: describePageCheck(check),
+    event: { name: "check_page", url: check.url, passed: problems === 0, note: problems ? `${problems} problem${problems === 1 ? "" : "s"}` : undefined, path: check.screenshot },
+  };
+}
+
+export type TodoStatus = "pending" | "in_progress" | "done";
+export type Todo = { text: string; status: TodoStatus };
+const TODO_STATUSES = new Set<TodoStatus>(["pending", "in_progress", "done"]);
+const MAX_TODOS = 30;
+
+export function formatTodos(todos: Todo[]): string {
+  return todos.map((todo) => `${todo.status === "done" ? "[x]" : todo.status === "in_progress" ? "[>]" : "[ ]"} ${todo.text}`).join("\n");
+}
+
+async function writeTodos(opts: ToolOptions): Promise<Outcome> {
+  if (!opts.todos) return { content: "Todos are not available here.", event: { name: "write_todos", denied: true } };
+  const raw = opts.args.todos;
+  if (!Array.isArray(raw)) return { content: "todos must be a list of { text, status }.", event: { name: "write_todos", denied: true } };
+  const todos: Todo[] = [];
+  for (const item of raw.slice(0, MAX_TODOS)) {
+    const { text, status } = (item ?? {}) as { text?: unknown; status?: unknown };
+    if (typeof text !== "string" || !text.trim()) continue;
+    const state = typeof status === "string" && TODO_STATUSES.has(status as TodoStatus) ? (status as TodoStatus) : "pending";
+    todos.push({ text: text.trim().slice(0, 200), status: state });
+  }
+  opts.todos.items = todos;
+  const done = todos.filter((todo) => todo.status === "done").length;
+  return {
+    content: todos.length ? `Todos updated:\n${formatTodos(todos)}` : "Todos cleared.",
+    event: { name: "write_todos", note: todos.length ? `${done} of ${todos.length} done` : "cleared" },
+  };
+}
+
+const pageCache = new Map<string, FetchedPage>();
+const PAGE_CACHE_SIZE = 5;
+
+async function readUrl(opts: ToolOptions): Promise<Outcome> {
+  const input = String(opts.args.url ?? "").trim();
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    return { content: `${input || "(empty)"} is not a valid URL. Pass a full https:// address.`, event: { name: "read_url", url: input, denied: true } };
+  }
+  const host = url.hostname.toLowerCase();
+  if (!isDocsHost(host)) {
+    const ok = await permit(opts, { kind: "url", host, summary: `CoderBaba wants to read ${url.toString()}. Allow?` });
+    if (!ok) return { content: `The user denied reading ${host}.`, event: { name: "read_url", url: url.toString(), denied: true } };
+  }
+  const requested = Number(opts.args.offset);
+  const offset = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 0;
+  let page = offset ? pageCache.get(url.toString()) : undefined;
+  if (!page) {
+    try {
+      page = await fetchPublicPage(url.toString(), opts.web);
+    } catch (error) {
+      return { content: error instanceof Error ? error.message : "Could not read the page.", event: { name: "read_url", url: url.toString(), denied: true } };
+    }
+    pageCache.delete(url.toString());
+    pageCache.set(url.toString(), page);
+    if (pageCache.size > PAGE_CACHE_SIZE) pageCache.delete(pageCache.keys().next().value!);
+  }
+  const status = page.status >= 400 ? ` (HTTP ${page.status})` : "";
+  const header = `${page.url}${status}${page.truncated ? " (cut at 2 MB)" : ""}`;
+  return {
+    content: `${header}\n\n${pageSlice(page.text, offset) || "(empty page)"}`,
+    event: { name: "read_url", url: page.url, note: offset ? `from ${offset}` : undefined },
+  };
 }
 
 async function askSecret(opts: ToolOptions): Promise<Outcome> {
@@ -740,4 +879,72 @@ export const TOOL_DEFINITIONS = [
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "read_url",
+      description:
+        "Read a public web page (documentation, npm or PyPI pages, GitHub READMEs) as text. There is no web search, so pass a URL you know. Long pages come in slices; pass offset to read more.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full https:// URL." },
+          offset: { type: "number", description: "Character offset from a previous (more: offset N) note." },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "check_page",
+      description:
+        "Open a local page (http://localhost:PORT/...) in a headless browser and report the HTTP status, uncaught errors, console errors, failed requests, and visible text. Use it after a dev server is ready; curl can't see errors that happen in the browser.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Local URL, such as http://localhost:5173/." },
+          wait_for_text: { type: "string", description: "Text that should appear on the page, such as a heading." },
+          screenshot: { type: "boolean", description: "Save a screenshot for the user under .coderbaba/screenshots/." },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_todos",
+      description:
+        "Replace the todo list the user sees. Use it for tasks with more than three steps: write the plan first, keep exactly one item in_progress, and mark items done as you finish them.",
+      parameters: {
+        type: "object",
+        properties: {
+          todos: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                text: { type: "string" },
+                status: { type: "string", enum: ["pending", "in_progress", "done"] },
+              },
+              required: ["text", "status"],
+            },
+          },
+        },
+        required: ["todos"],
+      },
+    },
+  },
 ];
+
+/** Run a command the user typed after !, with the same environment as the agent's commands. */
+export async function runUserCommand(
+  command: string,
+  opts: { cwd: string; onOutput?: (chunk: string) => void; timeoutMs?: number },
+): Promise<{ code: number; output: string; timedOut: boolean }> {
+  const resolved = await resolveInProject(opts.cwd, ".");
+  const { env } = await buildCommandEnv({ root: resolved.root, cwd: resolved.full });
+  return runShell(command, resolved.full, { timeoutMs: opts.timeoutMs ?? MAX_TIMEOUT_SECONDS * 1000, env, onOutput: opts.onOutput });
+}

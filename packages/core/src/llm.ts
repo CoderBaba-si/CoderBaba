@@ -46,7 +46,7 @@ class ProxyLlm implements Llm {
       taskId: input.taskId,
       model: input.model,
       messages: input.messages,
-      tools: input.tools,
+      tools: input.tools.length ? input.tools : undefined,
     };
     return postChat(`${apiBaseUrl()}/api/chat`, body, { Authorization: `Bearer ${this.token}` }, input.onText);
   }
@@ -60,7 +60,7 @@ class OpenRouterLlm implements Llm {
     const body = {
       model: model?.openrouterId ?? input.model,
       messages: input.messages,
-      tools: input.tools,
+      tools: input.tools.length ? input.tools : undefined,
       stream: true,
       usage: { include: true },
     };

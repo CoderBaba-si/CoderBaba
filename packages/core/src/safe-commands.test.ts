@@ -34,6 +34,8 @@ beforeAll(async () => {
     for (const name of ["python", "python3", "pip", "python.exe", "pip.exe"]) await write(`django/.venv/${bin}/${name}`);
   }
   await write("nopy/manage.py", "");
+  await write("tc/package.json", JSON.stringify({ scripts: { typecheck: "tsc --noEmit -p tsconfig.app.json" } }));
+  await write("tcbad/package.json", JSON.stringify({ scripts: { typecheck: "tsc --noEmit && node evil.js" } }));
 });
 
 afterEach(() => {
@@ -82,6 +84,9 @@ const runsWithoutAsking: Case[] = [
   ["npm run dev", { via: "start_process" }, true],
   ["npm run dev", { dir: "vite", via: "start_process" }, true],
   ["npm run lint", { dir: "vite" }, true],
+  ["npm run typecheck", { dir: "tc" }, true],
+  ["pnpm typecheck", { dir: "tc" }, true],
+  ["npm run typecheck", { dir: "tcbad" }, false],
   ["npm run dev", { dir: "server", via: "start_process" }, true],
   ["docker ps", {}, true],
   ["docker logs app-mongo --tail 50", {}, true],

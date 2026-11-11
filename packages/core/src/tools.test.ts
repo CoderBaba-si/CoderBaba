@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { Checkpoints } from "./checkpoints.js";
 import type { PermissionRequest } from "./permissions.js";
 import { ProcessManager } from "./processes.js";
-import { runTool } from "./tools.js";
+import { buildSystemPrompt } from "./prompt.js";
+import { runTool, runUserCommand } from "./tools.js";
 
 async function project() {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cb-tools-"));
@@ -209,6 +210,50 @@ describe("runTool", () => {
     } finally {
       await processes.stopAll();
     }
+  });
+
+  it("write_todos replaces the list and keeps only valid items", async () => {
+    const { cwd, checkpoints } = await project();
+    const todos = { items: [{ text: "old", status: "done" as const }] };
+    const result = await runTool({
+      name: "write_todos",
+      args: {
+        todos: [
+          { text: "Scaffold the client", status: "done" },
+          { text: "Build the API", status: "in_progress" },
+          { text: "  ", status: "pending" },
+          { text: "Connect MongoDB", status: "someday" },
+        ],
+      },
+      cwd,
+      turnId: "t5",
+      checkpoints,
+      allows: new Set(),
+      askPermission: async () => "deny",
+      todos,
+    });
+    expect(todos.items).toEqual([
+      { text: "Scaffold the client", status: "done" },
+      { text: "Build the API", status: "in_progress" },
+      { text: "Connect MongoDB", status: "pending" },
+    ]);
+    expect(result.content).toBe("Todos updated:\n[x] Scaffold the client\n[>] Build the API\n[ ] Connect MongoDB");
+    expect(result.event).toMatchObject({ name: "write_todos", note: "1 of 3 done" });
+    expect(buildSystemPrompt({ root: cwd, todos: todos.items })).toContain("[>] Build the API");
+  });
+
+  it("runUserCommand runs in the project with the venv on PATH", async () => {
+    const { cwd } = await project();
+    await fs.writeFile(path.join(cwd, "hello.cjs"), "console.log('hi from ' + require('path').basename(process.cwd()))\n");
+    await fs.mkdir(path.join(cwd, ".venv"));
+    await fs.writeFile(path.join(cwd, ".venv", "pyvenv.cfg"), "home = /usr/bin\n");
+    await fs.writeFile(path.join(cwd, "env.cjs"), "console.log(process.env.VIRTUAL_ENV ? 'venv on' : 'venv off')\n");
+    const lines: string[] = [];
+    const result = await runUserCommand('node "hello.cjs"', { cwd, onOutput: (chunk) => lines.push(chunk) });
+    expect(result).toMatchObject({ code: 0, timedOut: false });
+    expect(result.output.trim()).toBe(`hi from ${path.basename(cwd)}`);
+    expect(lines.join("")).toContain("hi from");
+    expect((await runUserCommand('node "env.cjs"', { cwd })).output.trim()).toBe("venv on");
   });
 
   it("does not write when the edit is denied", async () => {

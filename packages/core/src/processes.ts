@@ -318,8 +318,19 @@ export class ProcessManager {
     return this.start({ ...item.spec, name: item.info.name, onOutput });
   }
 
+  private cleanups = new Set<() => Promise<void>>();
+
+  /** Run fn on stopAll, for helpers such as the page-check browser. Returns a function that removes it. */
+  addCleanup(fn: () => Promise<void>): () => void {
+    this.cleanups.add(fn);
+    return () => this.cleanups.delete(fn);
+  }
+
   async stopAll(): Promise<void> {
-    await Promise.all(this.running().map((info) => this.stop(info.id)));
+    await Promise.all([
+      ...this.running().map((info) => this.stop(info.id)),
+      ...[...this.cleanups].map((fn) => fn().catch(() => undefined)),
+    ]);
   }
 
   /** For process "exit" handlers: kill everything right away. */
