@@ -1,7 +1,7 @@
 {
   "name": "coderbaba",
   "version": "0.2.0",
-  "description": "Beginner-friendly terminal coding agent",
+  "description": "Free, open-source AI coding agent for your terminal. Builds, runs, tests and security-scans your app. No sign-in or API key.",
   "license": "MIT",
   "homepage": "https://coderbaba.si",
   "repository": {
@@ -14,10 +14,23 @@
   },
   "keywords": [
     "ai",
+    "ai-agent",
     "coding-agent",
+    "ai-coding-assistant",
     "cli",
     "terminal",
-    "beginner"
+    "beginner",
+    "free",
+    "open-source",
+    "llm",
+    "openrouter",
+    "qwen",
+    "code-generation",
+    "security-scanner",
+    "nextjs",
+    "react",
+    "django",
+    "mern"
   ],
   "type": "module",
   "bin": {
