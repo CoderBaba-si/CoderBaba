@@ -167,7 +167,7 @@ describe("runTool", () => {
     await fs.writeFile(path.join(cwd, ".venv", "lib", "x.py"), "needle\n");
     await fs.writeFile(path.join(cwd, "src", "a.py"), "needle\n");
     const result = await runTool({ name: "grep", args: { pattern: "needle" }, cwd, turnId: "t11", checkpoints, allows: new Set(), askPermission: async () => "allow" });
-    expect(result.content).toBe(`${path.join("src", "a.py")}:1: needle`);
+    expect(result.content).toBe("src/a.py:1: needle");
   });
 
   it("sends the last output line as progress", async () => {
